@@ -4,42 +4,20 @@ import React, {
   useContext,
   useEffect,
   useMemo,
+  useRef,
   useState,
 } from 'react';
-import {
-  onAuthStateChanged,
-  signInWithPopup,
-  signOut,
-  type User,
-} from 'firebase/auth';
-import {
-  collection,
-  deleteDoc,
-  doc,
-  getDoc,
-  getDocs,
-  limit,
-  onSnapshot,
-  query,
-  serverTimestamp,
-  setDoc,
-  updateDoc,
-  where,
-  type Timestamp,
-} from 'firebase/firestore';
-import {
-  auth,
-  db,
-  googleProvider,
-  handleFirestoreError,
-  OperationType,
-} from '../lib/firebase';
 import {
   DAILY_GEMINI_QUOTA_LIMIT,
   isCallableGeminiModel,
   type AiEngineMode,
   type CallableGeminiModelId,
 } from '../lib/aiEngineCatalog';
+import type {
+  AuthUserSession,
+  FreeLlmPublicStatus,
+  UserAccountTier,
+} from '../types/admin';
 
 export interface QuotaStatus {
   dateKey: string;
@@ -71,15 +49,39 @@ export interface GeminiXmlPartAttachment {
 }
 
 interface AuthAndAiContextValue {
-  user: User | null;
+  user: AuthUserSession | null;
+  sessionToken: string | null;
   authReady: boolean;
   isSigningIn: boolean;
+  isAdmin: boolean;
+  userTier: UserAccountTier;
+  lastAuthError: string | null;
+  clearLastAuthError: () => void;
+  authModalOpen: boolean;
+  openAuthModal: () => void;
+  closeAuthModal: () => void;
+  signInWithEmail: (email: string, password: string) => Promise<boolean>;
+  registerAccount: (email: string, displayName: string, password: string) => Promise<boolean>;
+  signInAsAdmin: (email: string, password: string) => Promise<boolean>;
+  claimAdminAccount: (input: { email: string; displayName: string; password: string }) => Promise<boolean>;
+  updateAdminAccount: (input: {
+    currentPassword: string;
+    newEmail: string;
+    newDisplayName: string;
+    newPassword?: string;
+  }) => Promise<boolean>;
+  signOutAccount: () => Promise<void>;
+  /** Legacy compatibility helper: opens the sign-in modal and resolves false until signed in. */
   signInWithGoogle: () => Promise<boolean>;
   signOutGoogle: () => Promise<void>;
   engineMode: AiEngineMode;
   setEngineMode: (mode: AiEngineMode) => void;
   geminiModel: CallableGeminiModelId;
   setGeminiModel: (model: string) => void;
+  freellmModel: string;
+  setFreeLlmModel: (model: string) => void;
+  freellmStatus: FreeLlmPublicStatus;
+  setFreeLlmStatus: (status: FreeLlmPublicStatus) => void;
   quota: QuotaStatus;
   chatMessages: AiChatMessageItem[];
   isChatOpen: boolean;
@@ -100,12 +102,15 @@ interface AuthAndAiContextValue {
   authorizedGeminiFetch: <T = Record<string, unknown>>(
     endpoint: string,
     payload: Record<string, unknown>,
-    options?: { overrideModel?: CallableGeminiModelId }
+    options?: {
+      overrideModel?: CallableGeminiModelId | string;
+      overrideEngine?: 'freellm' | 'gemini';
+    }
   ) => Promise<T>;
   onNotify?: (msg: string, type?: 'success' | 'error' | 'info') => void;
 }
 
-const LOCAL_PREF_KEY = 'temaloka_hybrid_ai_prefs_v1';
+const LOCAL_PREF_KEY = 'temaloka_hybrid_ai_prefs_v2';
 const LOCAL_CHAT_KEY = 'temaloka_local_ai_chat_v1';
 
 function getUtcDateKey(): string {
@@ -115,22 +120,42 @@ function getUtcDateKey(): string {
 function loadLocalPrefs(): {
   engineMode: AiEngineMode;
   geminiModel: CallableGeminiModelId;
+  freellmModel: string;
 } {
   try {
     const raw = localStorage.getItem(LOCAL_PREF_KEY);
-    if (!raw) return { engineMode: 'local', geminiModel: 'gemini-3.1-flash-lite' };
+    if (!raw) {
+      return {
+        engineMode: 'freellm',
+        geminiModel: 'gemini-3.1-flash-lite',
+        freellmModel: 'auto',
+      };
+    }
     const parsed = JSON.parse(raw) as {
       engineMode?: string;
       geminiModel?: string;
+      freellmModel?: string;
     };
+    const mode: AiEngineMode =
+      parsed.engineMode === 'gemini' || parsed.engineMode === 'local'
+        ? parsed.engineMode
+        : 'freellm';
     return {
-      engineMode: parsed.engineMode === 'gemini' ? 'gemini' : 'local',
+      engineMode: mode,
       geminiModel: isCallableGeminiModel(parsed.geminiModel || '')
         ? (parsed.geminiModel as CallableGeminiModelId)
         : 'gemini-3.1-flash-lite',
+      freellmModel:
+        typeof parsed.freellmModel === 'string' && parsed.freellmModel.trim()
+          ? parsed.freellmModel.trim()
+          : 'auto',
     };
   } catch {
-    return { engineMode: 'local', geminiModel: 'gemini-3.1-flash-lite' };
+    return {
+      engineMode: 'freellm',
+      geminiModel: 'gemini-3.1-flash-lite',
+      freellmModel: 'auto',
+    };
   }
 }
 
@@ -145,6 +170,14 @@ function loadLocalChat(): AiChatMessageItem[] {
   }
 }
 
+const DEFAULT_FREELLM_STATUS: FreeLlmPublicStatus = {
+  enabled: true,
+  defaultModel: 'auto',
+  routingStrategy: 'auto',
+  allowForGuests: true,
+  configuredProviders: [],
+};
+
 const AuthAndAiContext = createContext<AuthAndAiContextValue | null>(null);
 
 export const AuthAndAiProvider: React.FC<{
@@ -152,35 +185,47 @@ export const AuthAndAiProvider: React.FC<{
   onNotify?: (msg: string, type?: 'success' | 'error' | 'info') => void;
 }> = ({ children, onNotify }) => {
   const initialPrefs = useMemo(() => loadLocalPrefs(), []);
-  const [user, setUser] = useState<User | null>(null);
-  const [authReady, setAuthReady] = useState(false);
+
+  // Session Bearer token lives strictly in React state memory (never localStorage/sessionStorage)
+  const [sessionToken, setSessionToken] = useState<string | null>(null);
+  const [user, setUser] = useState<AuthUserSession | null>(null);
+  const [authReady, setAuthReady] = useState(true);
   const [isSigningIn, setIsSigningIn] = useState(false);
+  const [authModalOpen, setAuthModalOpen] = useState(false);
+  const [lastAuthError, setLastAuthError] = useState<string | null>(null);
+
   const [engineMode, setEngineModeState] = useState<AiEngineMode>(initialPrefs.engineMode);
   const [geminiModel, setGeminiModelState] = useState<CallableGeminiModelId>(
     initialPrefs.geminiModel
   );
+  const [freellmModel, setFreeLlmModelState] = useState<string>(initialPrefs.freellmModel);
+  const [freellmStatus, setFreeLlmStatus] = useState<FreeLlmPublicStatus>(DEFAULT_FREELLM_STATUS);
+
   const [quota, setQuota] = useState<QuotaStatus>(() => ({
     dateKey: getUtcDateKey(),
     usedCount: 0,
     dailyLimit: DAILY_GEMINI_QUOTA_LIMIT,
     remaining: DAILY_GEMINI_QUOTA_LIMIT,
   }));
+
   const [remoteChatMessages, setRemoteChatMessages] = useState<AiChatMessageItem[]>([]);
   const [localChatMessages, setLocalChatMessages] = useState<AiChatMessageItem[]>(loadLocalChat);
   const [isChatOpen, setChatOpen] = useState(false);
   const [attachedXmlParts, setAttachedXmlParts] = useState<GeminiXmlPartAttachment[]>([]);
 
-  // Persist local preferences
+  const tokenRef = useRef<string | null>(sessionToken);
+  tokenRef.current = sessionToken;
+
   useEffect(() => {
     try {
       localStorage.setItem(
         LOCAL_PREF_KEY,
-        JSON.stringify({ engineMode, geminiModel })
+        JSON.stringify({ engineMode, geminiModel, freellmModel })
       );
     } catch {
       // ignore
     }
-  }, [engineMode, geminiModel]);
+  }, [engineMode, geminiModel, freellmModel]);
 
   useEffect(() => {
     try {
@@ -190,18 +235,25 @@ export const AuthAndAiProvider: React.FC<{
     }
   }, [localChatMessages]);
 
-  // Listen to Firebase Auth state
+  // Fetch initial FreeLLM public status on mount
   useEffect(() => {
-    const unsubscribe = onAuthStateChanged(auth, (currentUser) => {
-      setUser(currentUser);
-      setAuthReady(true);
-    });
-    return () => unsubscribe();
+    let active = true;
+    fetch('/api/ai/freellm/models')
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data: { status?: FreeLlmPublicStatus } | null) => {
+        if (active && data?.status) {
+          setFreeLlmStatus(data.status);
+        }
+      })
+      .catch(() => {});
+    return () => {
+      active = false;
+    };
   }, []);
 
-  // Ensure Firestore user document & sync preferences, quota, and chat messages when signed in
+  // Load user chat messages & quota from Cloudflare D1 when authenticated
   useEffect(() => {
-    if (!authReady || !user) {
+    if (!user || !sessionToken) {
       setRemoteChatMessages([]);
       setQuota({
         dateKey: getUtcDateKey(),
@@ -212,181 +264,57 @@ export const AuthAndAiProvider: React.FC<{
       return;
     }
 
-    const userDocPath = `users/${user.uid}`;
-    const userRef = doc(db, 'users', user.uid);
-    const dateKey = getUtcDateKey();
-    const quotaPath = `users/${user.uid}/quotas/${dateKey}`;
-    const quotaRef = doc(db, 'users', user.uid, 'quotas', dateKey);
-
     let cancelled = false;
+    fetch('/api/chat-messages', {
+      headers: { Authorization: `Bearer ${sessionToken}` },
+    })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data: { messages?: AiChatMessageItem[] } | null) => {
+        if (!cancelled && Array.isArray(data?.messages)) {
+          setRemoteChatMessages(data.messages);
+        }
+      })
+      .catch(() => {});
 
-    const bootstrapUserProfile = async () => {
-      try {
-        const snap = await getDoc(userRef);
-        if (!snap.exists() && !cancelled) {
-          const payload: Record<string, unknown> = {
-            uid: user.uid,
-            displayName: (user.displayName || user.email || 'Pengguna Google').slice(0, 120),
-            preferredMode: engineMode,
-            preferredGeminiModel: geminiModel,
-            preferredLocalRuntime: 'builtin',
-            createdAt: serverTimestamp(),
-            updatedAt: serverTimestamp(),
-          };
-          if (user.photoURL) {
-            payload.photoUrl = user.photoURL.slice(0, 500);
-          }
-          await setDoc(userRef, payload);
-        }
-      } catch (err) {
-        if (err instanceof Error && err.message.includes('permission')) {
-          handleFirestoreError(err, OperationType.WRITE, userDocPath);
-        }
-      }
-
-      // Sync server memory quota status
-      try {
-        const idToken = await user.getIdToken();
-        const res = await fetch('/api/ai/quota-status', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            Authorization: `Bearer ${idToken}`,
-          },
-          body: JSON.stringify({ model: geminiModel }),
-        });
-        if (res.ok && !cancelled) {
-          const data = (await res.json()) as { quota?: QuotaStatus };
-          if (data.quota) {
-            setQuota((prev) => ({
-              dateKey: data.quota!.dateKey,
-              usedCount: Math.max(prev.usedCount, data.quota!.usedCount),
-              dailyLimit: data.quota!.dailyLimit,
-              remaining: Math.min(prev.remaining, data.quota!.remaining),
-            }));
-          }
-        }
-      } catch {
-        // ignore network hiccup
-      }
-    };
-
-    void bootstrapUserProfile();
-
-    const unsubUser = onSnapshot(
-      userRef,
-      (snap) => {
-        if (!snap.exists()) return;
-        const data = snap.data() as {
-          preferredMode?: string;
-          preferredGeminiModel?: string;
-        };
-        if (data.preferredMode === 'local' || data.preferredMode === 'gemini') {
-          setEngineModeState(data.preferredMode);
-        }
-        if (data.preferredGeminiModel && isCallableGeminiModel(data.preferredGeminiModel)) {
-          setGeminiModelState(data.preferredGeminiModel);
-        } else if (data.preferredGeminiModel === 'gemini-4-hydrogen') {
-          setGeminiModelState('gemini-3.1-flash-lite');
-          void updateDoc(userRef, {
-            preferredGeminiModel: 'gemini-3.1-flash-lite',
-            updatedAt: serverTimestamp(),
-          }).catch(() => {});
-        }
+    fetch('/api/ai/quota-status', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${sessionToken}`,
       },
-      (err) => {
-        handleFirestoreError(err, OperationType.GET, userDocPath);
-      }
-    );
-
-    const unsubQuota = onSnapshot(
-      quotaRef,
-      (snap) => {
-        if (!snap.exists()) return;
-        const data = snap.data() as {
-          dateKey?: string;
-          usedCount?: number;
-          dailyLimit?: number;
-        };
-        const used = typeof data.usedCount === 'number' ? data.usedCount : 0;
-        const limitVal =
-          typeof data.dailyLimit === 'number' ? data.dailyLimit : DAILY_GEMINI_QUOTA_LIMIT;
-        setQuota({
-          dateKey: data.dateKey || dateKey,
-          usedCount: used,
-          dailyLimit: limitVal,
-          remaining: Math.max(0, limitVal - used),
-        });
-      },
-      (err) => {
-        handleFirestoreError(err, OperationType.GET, quotaPath);
-      }
-    );
-
-    const chatCollectionPath = `users/${user.uid}/chatMessages`;
-    const chatQuery = query(
-      collection(db, 'users', user.uid, 'chatMessages'),
-      where('uid', '==', user.uid),
-      limit(80)
-    );
-
-    const unsubChat = onSnapshot(
-      chatQuery,
-      (snapshot) => {
-        const items: AiChatMessageItem[] = snapshot.docs.map((d) => {
-          const data = d.data() as {
-            role?: string;
-            content?: string;
-            engineLabel?: string;
-            modelId?: string;
-            suggestedCss?: string;
-            pageContext?: string;
-            createdAt?: Timestamp | null;
-          };
-          const createdAtMs =
-            data.createdAt && typeof data.createdAt.toMillis === 'function'
-              ? data.createdAt.toMillis()
-              : Date.now();
-          return {
-            id: d.id,
-            role: data.role === 'assistant' ? 'assistant' : 'user',
-            content: data.content || '',
-            engineLabel: data.engineLabel || 'AI',
-            modelId: data.modelId || 'gemini-3.1-flash-lite',
-            suggestedCss: data.suggestedCss,
-            pageContext: data.pageContext || 'preview',
-            createdAtMs,
-          };
-        });
-        items.sort((a, b) => a.createdAtMs - b.createdAtMs);
-        setRemoteChatMessages(items);
-      },
-      (err) => {
-        handleFirestoreError(err, OperationType.LIST, chatCollectionPath);
-      }
-    );
+      body: JSON.stringify({ engine: 'gemini', model: geminiModel }),
+    })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data: { quota?: QuotaStatus } | null) => {
+        if (!cancelled && data?.quota) {
+          setQuota(data.quota);
+        }
+      })
+      .catch(() => {});
 
     return () => {
       cancelled = true;
-      unsubUser();
-      unsubQuota();
-      unsubChat();
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [authReady, user?.uid]);
+  }, [user?.id, sessionToken, geminiModel]);
 
   const persistUserPref = useCallback(
-    async (patch: { preferredMode?: AiEngineMode; preferredGeminiModel?: CallableGeminiModelId }) => {
-      if (!user) return;
-      const userPath = `users/${user.uid}`;
-      const userRef = doc(db, 'users', user.uid);
+    async (patch: {
+      preferredMode?: AiEngineMode;
+      preferredGeminiModel?: CallableGeminiModelId;
+      preferredFreeLlmModel?: string;
+    }) => {
+      if (!tokenRef.current || !user) return;
       try {
-        await updateDoc(userRef, {
-          ...patch,
-          updatedAt: serverTimestamp(),
+        await fetch('/api/auth/preferences', {
+          method: 'PATCH',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${tokenRef.current}`,
+          },
+          body: JSON.stringify(patch),
         });
-      } catch (err) {
-        console.warn('Could not sync preference update:', err);
+      } catch {
+        // ignore offline hiccup
       }
     },
     [user]
@@ -413,104 +341,273 @@ export const AuthAndAiProvider: React.FC<{
     [onNotify, persistUserPref]
   );
 
-  const signInWithGoogle = useCallback(async (): Promise<boolean> => {
-    setIsSigningIn(true);
-    try {
-      const cred = await signInWithPopup(auth, googleProvider);
-      if (cred.user) {
-        onNotify?.(
-          `Berhasil masuk sebagai ${cred.user.displayName || cred.user.email || 'Akun Google'}.`,
-          'success'
-        );
-        return true;
-      }
-      return false;
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : 'Gagal masuk dengan Google.';
-      if (/popup-closed-by-user/i.test(msg)) {
-        onNotify?.('Popup Login Google ditutup sebelum selesai.', 'info');
-      } else {
-        onNotify?.(`Gagal Login Google: ${msg}`, 'error');
-      }
-      return false;
-    } finally {
-      setIsSigningIn(false);
-    }
-  }, [onNotify]);
+  const setFreeLlmModel = useCallback(
+    (model: string) => {
+      const clean = model.trim() || 'auto';
+      setFreeLlmModelState(clean);
+      setEngineModeState('freellm');
+      void persistUserPref({ preferredMode: 'freellm', preferredFreeLlmModel: clean });
+    },
+    [persistUserPref]
+  );
 
-  const signOutGoogle = useCallback(async () => {
-    try {
-      await signOut(auth);
-      setEngineModeState('local');
-      onNotify?.('Anda telah keluar dari akun Google. Mode dialihkan ke AI Lokal.', 'info');
-    } catch (err) {
-      onNotify?.(
-        err instanceof Error ? err.message : 'Gagal keluar dari akun Google.',
-        'error'
-      );
-    }
-  }, [onNotify]);
+  const applyAuthSession = useCallback(
+    (token: string, nextUser: AuthUserSession, serverQuota?: QuotaStatus) => {
+      setSessionToken(token);
+      setUser(nextUser);
+      setAuthReady(true);
+      if (serverQuota) setQuota(serverQuota);
+      if (
+        nextUser.preferredMode === 'local' ||
+        nextUser.preferredMode === 'freellm' ||
+        nextUser.preferredMode === 'gemini'
+      ) {
+        setEngineModeState(nextUser.preferredMode);
+      }
+      if (nextUser.preferredFreeLlmModel) {
+        setFreeLlmModelState(nextUser.preferredFreeLlmModel);
+      }
+      setLastAuthError(null);
+      setAuthModalOpen(false);
+    },
+    []
+  );
 
-  const syncQuotaDoc = useCallback(
-    async (serverQuota: QuotaStatus, modelUsed: string) => {
-      setQuota(serverQuota);
-      if (!user) return;
-      const quotaPath = `users/${user.uid}/quotas/${serverQuota.dateKey}`;
-      const quotaRef = doc(db, 'users', user.uid, 'quotas', serverQuota.dateKey);
+  const clearLastAuthError = useCallback(() => {
+    setLastAuthError(null);
+  }, []);
+
+  const signInWithEmail = useCallback(
+    async (email: string, password: string): Promise<boolean> => {
+      setIsSigningIn(true);
+      setLastAuthError(null);
       try {
-        const existingSnap = await getDoc(quotaRef);
-        if (!existingSnap.exists()) {
-          await setDoc(quotaRef, {
-            uid: user.uid,
-            dateKey: serverQuota.dateKey,
-            usedCount: Math.min(serverQuota.usedCount, DAILY_GEMINI_QUOTA_LIMIT),
-            dailyLimit: DAILY_GEMINI_QUOTA_LIMIT,
-            lastModel: modelUsed.slice(0, 64),
-            updatedAt: serverTimestamp(),
-          });
-        } else {
-          const prevUsed = Number(existingSnap.data()?.usedCount || 0);
-          const nextUsed = Math.min(
-            DAILY_GEMINI_QUOTA_LIMIT,
-            Math.max(prevUsed, Math.min(prevUsed + 1, serverQuota.usedCount))
-          );
-          await updateDoc(quotaRef, {
-            usedCount: nextUsed,
-            lastModel: modelUsed.slice(0, 64),
-            updatedAt: serverTimestamp(),
-          });
+        const res = await fetch('/api/auth/login', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ email, password }),
+        });
+        const data = (await res.json()) as {
+          token?: string;
+          user?: AuthUserSession;
+          quota?: QuotaStatus;
+          error?: string;
+        };
+        if (!res.ok || !data.token || !data.user) {
+          throw new Error(data.error || 'Email atau password salah.');
         }
+        applyAuthSession(data.token, data.user, data.quota);
+        onNotify?.(`Berhasil masuk sebagai ${data.user.displayName} (${data.user.email}).`, 'success');
+        return true;
       } catch (err) {
-        if (err instanceof Error && err.message.includes('permission')) {
-          handleFirestoreError(err, OperationType.WRITE, quotaPath);
-        }
+        const msg = err instanceof Error ? err.message : 'Gagal masuk ke akun TemaLoka.';
+        setLastAuthError(msg);
+        onNotify?.(msg, 'error');
+        return false;
+      } finally {
+        setIsSigningIn(false);
       }
     },
-    [user]
+    [applyAuthSession, onNotify]
   );
+
+  const registerAccount = useCallback(
+    async (email: string, displayName: string, password: string): Promise<boolean> => {
+      setIsSigningIn(true);
+      setLastAuthError(null);
+      try {
+        const res = await fetch('/api/auth/register', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ email, displayName, password }),
+        });
+        const data = (await res.json()) as {
+          token?: string;
+          user?: AuthUserSession;
+          quota?: QuotaStatus;
+          error?: string;
+        };
+        if (!res.ok || !data.token || !data.user) {
+          throw new Error(data.error || 'Gagal mendaftar akun baru.');
+        }
+        applyAuthSession(data.token, data.user, data.quota);
+        onNotify?.(`Akun "${data.user.displayName}" berhasil dibuat.`, 'success');
+        return true;
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : 'Gagal mendaftar akun.';
+        setLastAuthError(msg);
+        onNotify?.(msg, 'error');
+        return false;
+      } finally {
+        setIsSigningIn(false);
+      }
+    },
+    [applyAuthSession, onNotify]
+  );
+
+  const signInAsAdmin = useCallback(
+    async (email: string, password: string): Promise<boolean> => {
+      setIsSigningIn(true);
+      setLastAuthError(null);
+      try {
+        const res = await fetch('/api/admin/auth/login', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ email, password }),
+        });
+        const data = (await res.json()) as {
+          token?: string;
+          user?: AuthUserSession;
+          error?: string;
+        };
+        if (!res.ok || !data.token || !data.user) {
+          throw new Error(data.error || 'Email atau password Admin salah.');
+        }
+        applyAuthSession(data.token, data.user);
+        onNotify?.(`Login Admin berhasil (${data.user.email}).`, 'success');
+        return true;
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : 'Login Admin gagal.';
+        setLastAuthError(msg);
+        onNotify?.(msg, 'error');
+        return false;
+      } finally {
+        setIsSigningIn(false);
+      }
+    },
+    [applyAuthSession, onNotify]
+  );
+
+  const claimAdminAccount = useCallback(
+    async (input: { email: string; displayName: string; password: string }): Promise<boolean> => {
+      setIsSigningIn(true);
+      setLastAuthError(null);
+      try {
+        const res = await fetch('/api/admin/auth/claim', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(input),
+        });
+        const data = (await res.json()) as {
+          token?: string;
+          user?: AuthUserSession;
+          error?: string;
+        };
+        if (!res.ok || !data.token || !data.user) {
+          throw new Error(data.error || 'Gagal membuat password Admin awal.');
+        }
+        applyAuthSession(data.token, data.user);
+        onNotify?.(`Akun Admin (${data.user.email}) berhasil diamankan.`, 'success');
+        return true;
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : 'Gagal klaim akun Admin.';
+        setLastAuthError(msg);
+        onNotify?.(msg, 'error');
+        return false;
+      } finally {
+        setIsSigningIn(false);
+      }
+    },
+    [applyAuthSession, onNotify]
+  );
+
+  const updateAdminAccount = useCallback(
+    async (input: {
+      currentPassword: string;
+      newEmail: string;
+      newDisplayName: string;
+      newPassword?: string;
+    }): Promise<boolean> => {
+      if (!tokenRef.current) {
+        const msg = 'Sesi Admin tidak ditemukan. Masuk ulang terlebih dahulu.';
+        setLastAuthError(msg);
+        onNotify?.(msg, 'error');
+        return false;
+      }
+      setIsSigningIn(true);
+      setLastAuthError(null);
+      try {
+        const res = await fetch('/api/admin/account/update', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${tokenRef.current}`,
+          },
+          body: JSON.stringify(input),
+        });
+        const data = (await res.json()) as {
+          token?: string;
+          user?: AuthUserSession;
+          error?: string;
+        };
+        if (!res.ok || !data.token || !data.user) {
+          throw new Error(data.error || 'Gagal memperbarui akun Admin.');
+        }
+        applyAuthSession(data.token, data.user);
+        onNotify?.(`Akun Admin (${data.user.email}) berhasil diperbarui.`, 'success');
+        return true;
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : 'Gagal memperbarui akun Admin.';
+        setLastAuthError(msg);
+        onNotify?.(msg, 'error');
+        return false;
+      } finally {
+        setIsSigningIn(false);
+      }
+    },
+    [applyAuthSession, onNotify]
+  );
+
+  const signOutAccount = useCallback(async () => {
+    setSessionToken(null);
+    setUser(null);
+    setRemoteChatMessages([]);
+    if (engineMode === 'gemini') {
+      setEngineModeState('freellm');
+    }
+    onNotify?.('Anda telah keluar dari akun. Mode AI dialihkan ke FreeLLMAPI / Lokal.', 'info');
+  }, [engineMode, onNotify]);
+
+  const signInWithGoogle = useCallback(async (): Promise<boolean> => {
+    setAuthModalOpen(true);
+    return false;
+  }, []);
 
   const authorizedGeminiFetch = useCallback(
     async <T = Record<string, unknown>>(
       endpoint: string,
       payload: Record<string, unknown>,
-      options?: { overrideModel?: CallableGeminiModelId }
+      options?: {
+        overrideModel?: CallableGeminiModelId | string;
+        overrideEngine?: 'freellm' | 'gemini';
+      }
     ): Promise<T> => {
-      const currentUser = auth.currentUser;
-      if (!currentUser) {
-        throw new Error('Silakan Login Google terlebih dahulu untuk memakai Gemini Cloud.');
+      const activeEngine: 'freellm' | 'gemini' =
+        options?.overrideEngine || (engineMode === 'freellm' ? 'freellm' : 'gemini');
+      const selectedModel =
+        options?.overrideModel ||
+        (activeEngine === 'freellm' ? freellmModel : geminiModel);
+
+      if (activeEngine === 'gemini' && !tokenRef.current) {
+        setAuthModalOpen(true);
+        throw new Error(
+          'Masuk akun terlebih dahulu untuk memakai Gemini Cloud (atau pilih FreeLLMAPI / AI Lokal).'
+        );
       }
 
-      const selectedModel = options?.overrideModel || geminiModel;
-      const idToken = await currentUser.getIdToken();
+      const headers: Record<string, string> = {
+        'Content-Type': 'application/json',
+      };
+      if (tokenRef.current) {
+        headers.Authorization = `Bearer ${tokenRef.current}`;
+      }
 
       const res = await fetch(endpoint, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${idToken}`,
-        },
+        headers,
         body: JSON.stringify({
           ...payload,
+          engine: activeEngine,
           model: selectedModel,
         }),
       });
@@ -522,16 +619,19 @@ export const AuthAndAiProvider: React.FC<{
       };
 
       if (data?.quota) {
-        void syncQuotaDoc(data.quota, selectedModel);
+        setQuota(data.quota);
       }
 
       if (!res.ok) {
-        throw new Error(data?.error || `Permintaan Gemini gagal (HTTP ${res.status}).`);
+        if (res.status === 401 && activeEngine === 'gemini') {
+          setAuthModalOpen(true);
+        }
+        throw new Error(data?.error || `Permintaan AI gagal (HTTP ${res.status}).`);
       }
 
       return data;
     },
-    [geminiModel, syncQuotaDoc]
+    [engineMode, freellmModel, geminiModel]
   );
 
   const appendChatMessages = useCallback(
@@ -540,7 +640,7 @@ export const AuthAndAiProvider: React.FC<{
       assistantMsg: Omit<AiChatMessageItem, 'id' | 'createdAtMs'>
     ) => {
       const now = Date.now();
-      if (!user) {
+      if (!user || !tokenRef.current) {
         setLocalChatMessages((prev) => [
           ...prev.slice(-38),
           { ...userMsg, id: `local-u-${now}`, createdAtMs: now },
@@ -549,58 +649,52 @@ export const AuthAndAiProvider: React.FC<{
         return;
       }
 
-      const chatColPath = `users/${user.uid}/chatMessages`;
-      const makeDocId = (prefix: string) =>
-        `${prefix}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-
-      const saveOne = async (
-        id: string,
-        item: Omit<AiChatMessageItem, 'id' | 'createdAtMs'>
-      ) => {
-        const ref = doc(db, 'users', user.uid, 'chatMessages', id);
-        const docPayload: Record<string, unknown> = {
-          uid: user.uid,
-          role: item.role,
-          content: item.content.slice(0, 12000),
-          engineLabel: item.engineLabel.slice(0, 100),
-          modelId: item.modelId.slice(0, 64),
-          pageContext: item.pageContext.slice(0, 32),
-          createdAt: serverTimestamp(),
-        };
-        if (item.suggestedCss && item.suggestedCss.trim()) {
-          docPayload.suggestedCss = item.suggestedCss.trim().slice(0, 6000);
+      try {
+        const res = await fetch('/api/chat-messages', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${tokenRef.current}`,
+          },
+          body: JSON.stringify({
+            messages: [
+              { ...userMsg, createdAtMs: now },
+              { ...assistantMsg, createdAtMs: now + 1 },
+            ],
+          }),
+        });
+        const data = (await res.json()) as { saved?: AiChatMessageItem[] };
+        if (res.ok && Array.isArray(data.saved) && data.saved.length > 0) {
+          setRemoteChatMessages((prev) => [...prev, ...data.saved!]);
+          return;
         }
-        try {
-          await setDoc(ref, docPayload);
-        } catch (err) {
-          handleFirestoreError(err, OperationType.CREATE, `${chatColPath}/${id}`);
-        }
-      };
-
-      await saveOne(makeDocId('usr'), userMsg);
-      await saveOne(makeDocId('ast'), assistantMsg);
+      } catch {
+        // Fallback to optimistic state
+      }
+      setRemoteChatMessages((prev) => [
+        ...prev,
+        { ...userMsg, id: `tmp-u-${now}`, createdAtMs: now },
+        { ...assistantMsg, id: `tmp-a-${now + 1}`, createdAtMs: now + 1 },
+      ]);
     },
     [user]
   );
 
   const clearChatMessages = useCallback(async () => {
-    if (!user) {
+    if (!user || !tokenRef.current) {
       setLocalChatMessages([]);
       onNotify?.('Riwayat Chat AI lokal dibersihkan.', 'info');
       return;
     }
-    const chatColPath = `users/${user.uid}/chatMessages`;
     try {
-      const q = query(
-        collection(db, 'users', user.uid, 'chatMessages'),
-        where('uid', '==', user.uid),
-        limit(80)
-      );
-      const snap = await getDocs(q);
-      await Promise.all(snap.docs.map((d) => deleteDoc(d.ref)));
-      onNotify?.('Riwayat Chat AI akun Google Anda dibersihkan.', 'info');
-    } catch (err) {
-      handleFirestoreError(err, OperationType.DELETE, chatColPath);
+      await fetch('/api/chat-messages', {
+        method: 'DELETE',
+        headers: { Authorization: `Bearer ${tokenRef.current}` },
+      });
+      setRemoteChatMessages([]);
+      onNotify?.('Riwayat Chat AI akun Anda berhasil dibersihkan.', 'info');
+    } catch {
+      onNotify?.('Gagal membersihkan riwayat chat di server.', 'error');
     }
   }, [onNotify, user]);
 
@@ -617,28 +711,23 @@ export const AuthAndAiProvider: React.FC<{
       if (valid.length === 0) return;
 
       setAttachedXmlParts((prev) => {
-        if (options?.replace) {
-          return valid;
-        }
+        if (options?.replace) return valid;
         const byId = new Map<string, GeminiXmlPartAttachment>();
-        for (const item of prev) {
-          byId.set(item.id, item);
-        }
-        for (const item of valid) {
-          byId.set(item.id, item);
-        }
+        for (const item of prev) byId.set(item.id, item);
+        for (const item of valid) byId.set(item.id, item);
         return Array.from(byId.values()).sort((a, b) => a.index - b.index);
       });
 
       if (options?.switchToGemini !== false) {
-        setEngineModeState('gemini');
-        void persistUserPref({ preferredMode: 'gemini' });
+        const nextMode: AiEngineMode = user ? 'gemini' : 'freellm';
+        setEngineModeState(nextMode);
+        void persistUserPref({ preferredMode: nextMode });
       }
       if (options?.openChat !== false) {
         setChatOpen(true);
       }
     },
-    [persistUserPref]
+    [persistUserPref, user]
   );
 
   const removeAttachedXmlPart = useCallback((partId: string) => {
@@ -650,17 +739,43 @@ export const AuthAndAiProvider: React.FC<{
   }, []);
 
   const chatMessages = user ? remoteChatMessages : localChatMessages;
+  const isAdmin = user?.role === 'admin';
+  const userTier: UserAccountTier = user ? user.tier : 'free';
 
   const value: AuthAndAiContextValue = {
     user,
+    sessionToken,
     authReady,
     isSigningIn,
+    isAdmin,
+    userTier,
+    lastAuthError,
+    clearLastAuthError,
+    authModalOpen,
+    openAuthModal: () => {
+      setLastAuthError(null);
+      setAuthModalOpen(true);
+    },
+    closeAuthModal: () => {
+      setLastAuthError(null);
+      setAuthModalOpen(false);
+    },
+    signInWithEmail,
+    registerAccount,
+    signInAsAdmin,
+    claimAdminAccount,
+    updateAdminAccount,
+    signOutAccount,
     signInWithGoogle,
-    signOutGoogle,
+    signOutGoogle: signOutAccount,
     engineMode,
     setEngineMode,
     geminiModel,
     setGeminiModel,
+    freellmModel,
+    setFreeLlmModel,
+    freellmStatus,
+    setFreeLlmStatus,
     quota,
     chatMessages,
     isChatOpen,

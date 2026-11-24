@@ -1,15 +1,77 @@
 import 'dotenv/config';
+import crypto from 'node:crypto';
 import express from 'express';
-import fs from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { GoogleGenAI, Type } from '@google/genai';
-import { initializeApp as initializeAdminApp, getApps as getAdminApps, getApp as getAdminApp } from 'firebase-admin/app';
-import { getAuth as getAdminAuth } from 'firebase-admin/auth';
+import {
+  authenticateAdminLogin,
+  authenticateAppUser,
+  claimPrimaryAdminAccount,
+  dbAll,
+  dbGet,
+  dbRun,
+  getActiveDbMode,
+  getAdminAuthStatus,
+  getD1AdminConfigView,
+  getPaymentSettingsConfig,
+  getPremiumSettingsConfig,
+  getSessionUserByClaims,
+  getSiteAdsenseConfig,
+  getSiteSeoConfig,
+  getSqliteDb,
+  initializeRemoteD1SchemaNow,
+  listAdsenseUnits,
+  listManagedUsers,
+  loadStoredD1Credentials,
+  registerAppUser,
+  savePaymentSettingsConfig,
+  savePremiumSettingsConfig,
+  saveSiteAdsenseConfig,
+  saveSiteSeoConfig,
+  saveStoredD1Credentials,
+  setAppUserFeatureOverrides,
+  setAppUserTier,
+  signSessionToken,
+  syncLocalSqliteToRemoteD1,
+  testCloudflareD1Connection,
+  updatePrimaryAdminAccount,
+  verifySessionToken,
+} from './src/server/d1Database';
+import {
+  callFreeLlmChat,
+  callFreeLlmJson,
+  getFreeLlmPublicStatus,
+  loadFreeLlmConfig,
+  saveFreeLlmConfig,
+  testFreeLlmGateway,
+  toFreeLlmAdminView,
+} from './src/server/freellmService';
+import {
+  getEffectiveGeminiApiKey,
+  getGoogleCloudPublicStatus,
+  loadGoogleCloudConfig,
+  saveGoogleCloudConfig,
+  testGoogleCloudConnection,
+  toGoogleCloudAdminView,
+  warmGoogleCloudConfigCache,
+} from './src/server/googleCloudService';
+import { FREELLM_MODELS } from './src/lib/aiEngineCatalog';
+import {
+  ADSENSE_FIELD_LIMITS,
+  sanitizeSlotDigits,
+  type AdsenseUnitFormatType,
+  type AdsenseUnitPlacementType,
+} from './src/types/adsense';
+import type { AuthUserSession } from './src/types/admin';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+
+// Ensure SQLite D1-compatible store is initialized on boot and warm Google Cloud cache
+getSqliteDb();
+void warmGoogleCloudConfigCache();
 
 const app = express();
 
@@ -42,61 +104,118 @@ const PORT = resolveServerPort();
 
 app.use(express.json({ limit: '10mb' }));
 
-interface FirebaseAppletConfigInfo {
-  projectId: string | null;
-  firestoreDatabaseId: string;
-  apiKey: string | null;
-}
-
-function readFirebaseAppletConfig(): FirebaseAppletConfigInfo {
-  try {
-    const configPath = path.resolve(__dirname, 'firebase-applet-config.json');
-    if (!fs.existsSync(configPath)) {
-      return { projectId: null, firestoreDatabaseId: '(default)', apiKey: null };
-    }
-    const raw = fs.readFileSync(configPath, 'utf8');
-    const parsed = JSON.parse(raw) as {
-      projectId?: string;
-      firestoreDatabaseId?: string;
-      apiKey?: string;
-    };
-    const id = typeof parsed.projectId === 'string' ? parsed.projectId.trim() : '';
-    const dbId =
-      typeof parsed.firestoreDatabaseId === 'string' && parsed.firestoreDatabaseId.trim()
-        ? parsed.firestoreDatabaseId.trim()
-        : '(default)';
-    const apiKey = typeof parsed.apiKey === 'string' && parsed.apiKey.trim() ? parsed.apiKey.trim() : null;
-    if (!id || id === 'remixed-project-id') {
-      return { projectId: null, firestoreDatabaseId: '(default)', apiKey: null };
-    }
-    return { projectId: id, firestoreDatabaseId: dbId, apiKey };
-  } catch {
-    return { projectId: null, firestoreDatabaseId: '(default)', apiKey: null };
-  }
-}
-
-const FIREBASE_APPLET_CONFIG = readFirebaseAppletConfig();
-const FIREBASE_PROJECT_ID = FIREBASE_APPLET_CONFIG.projectId;
-const firebaseAdminApp = FIREBASE_PROJECT_ID
-  ? getAdminApps().length
-    ? getAdminApp()
-    : initializeAdminApp({ projectId: FIREBASE_PROJECT_ID })
-  : null;
-
 const CALLABLE_GEMINI_MODELS = new Set(['gemini-3.1-flash-lite']);
 const PRO_GEMINI_MODELS = new Set(['gemini-4-hydrogen', 'gemini-4-neon', 'gemini-4-carbon', 'gemini-4-argon']);
 const DAILY_GEMINI_QUOTA_LIMIT = 25;
-const uidDailyQuotaMap = new Map<string, number>();
 
 function getUtcDateKey(): string {
   return new Date().toISOString().slice(0, 10);
 }
 
-interface VerifiedGeminiRequest {
-  uid: string;
-  email: string;
-  model: 'gemini-3.1-flash-lite';
-  quota: {
+function extractBearerToken(req: express.Request): string {
+  const authHeader = req.headers.authorization || '';
+  const match = /^Bearer\s+(.+)$/i.exec(authHeader.trim());
+  return match?.[1] || '';
+}
+
+async function resolveOptionalUser(req: express.Request): Promise<AuthUserSession | null> {
+  const token = extractBearerToken(req);
+  if (!token) return null;
+  const claims = verifySessionToken(token);
+  if (!claims) return null;
+  return await getSessionUserByClaims(claims);
+}
+
+async function requireAuthenticatedUser(
+  req: express.Request,
+  res: express.Response
+): Promise<AuthUserSession | null> {
+  const session = await resolveOptionalUser(req);
+  if (!session) {
+    res.status(401).json({
+      error: 'Sesi login diperlukan atau telah kedaluwarsa. Silakan masuk terlebih dahulu.',
+      code: 'AUTH_REQUIRED',
+    });
+    return null;
+  }
+  return session;
+}
+
+async function requireAdminSession(
+  req: express.Request,
+  res: express.Response
+): Promise<AuthUserSession | null> {
+  const session = await requireAuthenticatedUser(req, res);
+  if (!session) return null;
+  if (session.role !== 'admin') {
+    res.status(403).json({
+      error: 'Akses ditolak. Fitur ini khusus Admin TemaLoka.',
+      code: 'ADMIN_REQUIRED',
+    });
+    return null;
+  }
+  return session;
+}
+
+async function getUserDailyQuota(
+  userId: string,
+  options?: { increment?: boolean; model?: string }
+): Promise<{
+  dateKey: string;
+  usedCount: number;
+  dailyLimit: number;
+  remaining: number;
+}> {
+  const dateKey = getUtcDateKey();
+  const bucketKey = `${userId}:${dateKey}`;
+  const row = await dbGet<{ used_count: number; daily_limit: number }>(
+    'SELECT used_count, daily_limit FROM user_quotas WHERE bucket_key = ?',
+    [bucketKey]
+  );
+  const currentUsed = Number(row?.used_count || 0);
+  const limit = Number(row?.daily_limit || DAILY_GEMINI_QUOTA_LIMIT);
+
+  if (options?.increment) {
+    if (currentUsed >= limit) {
+      return {
+        dateKey,
+        usedCount: currentUsed,
+        dailyLimit: limit,
+        remaining: 0,
+      };
+    }
+    const nextUsed = currentUsed + 1;
+    await dbRun(
+      `INSERT INTO user_quotas (bucket_key, user_id, date_key, used_count, daily_limit, last_model, updated_at_ms)
+       VALUES (?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(bucket_key) DO UPDATE SET
+         used_count=excluded.used_count,
+         last_model=excluded.last_model,
+         updated_at_ms=excluded.updated_at_ms`,
+      [bucketKey, userId, dateKey, nextUsed, limit, (options.model || '').slice(0, 64), Date.now()]
+    );
+    return {
+      dateKey,
+      usedCount: nextUsed,
+      dailyLimit: limit,
+      remaining: Math.max(0, limit - nextUsed),
+    };
+  }
+
+  return {
+    dateKey,
+    usedCount: currentUsed,
+    dailyLimit: limit,
+    remaining: Math.max(0, limit - currentUsed),
+  };
+}
+
+interface VerifiedAiExecution {
+  engine: 'freellm' | 'gemini';
+  user: AuthUserSession | null;
+  geminiModel: 'gemini-3.1-flash-lite';
+  freellmModel: string;
+  quota?: {
     dateKey: string;
     usedCount: number;
     dailyLimit: number;
@@ -104,45 +223,47 @@ interface VerifiedGeminiRequest {
   };
 }
 
-async function verifyAndChargeGeminiRequest(
+async function resolveAiExecutionRequest(
   req: express.Request,
   res: express.Response,
   options?: { consumeQuota?: boolean }
-): Promise<VerifiedGeminiRequest | null> {
-  if (!firebaseAdminApp) {
-    res.status(503).json({
-      error: 'Autentikasi Firebase belum terkonfigurasi di server.',
-    });
-    return null;
-  }
+): Promise<VerifiedAiExecution | null> {
+  const requestedEngine = req.body?.engine === 'freellm' ? 'freellm' : 'gemini';
+  const session = await resolveOptionalUser(req);
 
-  const authHeader = req.headers.authorization || '';
-  const match = /^Bearer\s+(.+)$/i.exec(authHeader.trim());
-  if (!match?.[1]) {
-    res.status(401).json({
-      error: 'Login Google diperlukan untuk menjalankan mesin AI Gemini.',
-      code: 'AUTH_REQUIRED',
-    });
-    return null;
-  }
-
-  let uid = '';
-  let email = '';
-  try {
-    const decoded = await getAdminAuth(firebaseAdminApp).verifyIdToken(match[1]);
-    if (!decoded.email_verified) {
-      res.status(403).json({
-        error: 'Akun Google Anda belum terverifikasi.',
-        code: 'EMAIL_NOT_VERIFIED',
+  if (requestedEngine === 'freellm') {
+    const cfg = await loadFreeLlmConfig();
+    if (!cfg.enabled) {
+      res.status(503).json({
+        error: 'Mesin FreeLLMAPI sedang dinonaktifkan oleh Admin di Panel Admin.',
+        code: 'FREELLM_DISABLED',
       });
       return null;
     }
-    uid = decoded.uid;
-    email = decoded.email || '';
-  } catch {
+    if (!cfg.allowForGuests && !session) {
+      res.status(401).json({
+        error: 'Admin mewajibkan login akun untuk mengakses FreeLLMAPI.',
+        code: 'AUTH_REQUIRED',
+      });
+      return null;
+    }
+    const freellmModel =
+      typeof req.body?.model === 'string' && req.body.model.trim()
+        ? req.body.model.trim().slice(0, 100)
+        : cfg.defaultModel || 'auto';
+    return {
+      engine: 'freellm',
+      user: session,
+      geminiModel: 'gemini-3.1-flash-lite',
+      freellmModel,
+    };
+  }
+
+  // Gemini Cloud Engine requires authenticated account
+  if (!session) {
     res.status(401).json({
-      error: 'Sesi Login Google tidak valid atau telah kedaluwarsa. Silakan masuk ulang.',
-      code: 'INVALID_TOKEN',
+      error: 'Masuk dengan akun TemaLoka terlebih dahulu untuk memakai Gemini Cloud (atau pilih FreeLLMAPI / AI Lokal).',
+      code: 'AUTH_REQUIRED',
     });
     return null;
   }
@@ -151,61 +272,48 @@ async function verifyAndChargeGeminiRequest(
     typeof req.body?.model === 'string' && req.body.model.trim()
       ? req.body.model.trim()
       : 'gemini-3.1-flash-lite';
-  if (PRO_GEMINI_MODELS.has(requestedModel)) {
+  if (PRO_GEMINI_MODELS.has(requestedModel) && session.tier !== 'pro' && session.role !== 'admin') {
     res.status(403).json({
-      error: `Model "${requestedModel}" membutuhkan akun Gemini yang Pro.`,
+      error: `Model "${requestedModel}" membutuhkan akun Pro atau Admin.`,
       code: 'PRO_MODEL_REQUIRED',
     });
     return null;
   }
 
-  const model: 'gemini-3.1-flash-lite' = CALLABLE_GEMINI_MODELS.has(requestedModel)
+  const geminiModel: 'gemini-3.1-flash-lite' = CALLABLE_GEMINI_MODELS.has(requestedModel)
     ? (requestedModel as 'gemini-3.1-flash-lite')
     : 'gemini-3.1-flash-lite';
 
-  const dateKey = getUtcDateKey();
-  const bucketKey = `${uid}:${dateKey}`;
-  const currentUsed = uidDailyQuotaMap.get(bucketKey) ?? 0;
-
   if (options?.consumeQuota !== false) {
-    if (currentUsed >= DAILY_GEMINI_QUOTA_LIMIT) {
+    const before = await getUserDailyQuota(session.id, { increment: false });
+    if (before.remaining <= 0) {
       res.status(429).json({
-        error: `Batas kuota harian Gemini untuk akun ini telah tercapai (${DAILY_GEMINI_QUOTA_LIMIT}/${DAILY_GEMINI_QUOTA_LIMIT}). Beralihlah ke AI Lokal di perangkat Anda agar tetap dapat bekerja tanpa limit server.`,
+        error: `Batas kuota harian Gemini (${before.dailyLimit}/${before.dailyLimit}) telah tercapai. Beralih ke FreeLLMAPI atau AI Lokal agar tetap bekerja tanpa limit.`,
         code: 'DAILY_QUOTA_EXCEEDED',
-        quota: {
-          dateKey,
-          usedCount: currentUsed,
-          dailyLimit: DAILY_GEMINI_QUOTA_LIMIT,
-          remaining: 0,
-        },
+        quota: before,
       });
       return null;
     }
-    const nextUsed = currentUsed + 1;
-    uidDailyQuotaMap.set(bucketKey, nextUsed);
+    const updatedQuota = await getUserDailyQuota(session.id, {
+      increment: true,
+      model: geminiModel,
+    });
     return {
-      uid,
-      email,
-      model,
-      quota: {
-        dateKey,
-        usedCount: nextUsed,
-        dailyLimit: DAILY_GEMINI_QUOTA_LIMIT,
-        remaining: Math.max(0, DAILY_GEMINI_QUOTA_LIMIT - nextUsed),
-      },
+      engine: 'gemini',
+      user: session,
+      geminiModel,
+      freellmModel: 'auto',
+      quota: updatedQuota,
     };
   }
 
+  const currentQuota = await getUserDailyQuota(session.id, { increment: false });
   return {
-    uid,
-    email,
-    model,
-    quota: {
-      dateKey,
-      usedCount: currentUsed,
-      dailyLimit: DAILY_GEMINI_QUOTA_LIMIT,
-      remaining: Math.max(0, DAILY_GEMINI_QUOTA_LIMIT - currentUsed),
-    },
+    engine: 'gemini',
+    user: session,
+    geminiModel,
+    freellmModel: 'auto',
+    quota: currentQuota,
   };
 }
 
@@ -215,13 +323,13 @@ function getGeminiErrorResponse(err: unknown, fallbackMessage: string): { status
     return {
       status: 429,
       message:
-        'Batas permintaan Gemini API tercapai sementara. Coba lagi sebentar, pilih model Flash Lite, atau alihkan ke AI Lokal.',
+        'Batas permintaan AI tercapai sementara. Coba lagi sebentar, pilih FreeLLMAPI, atau alihkan ke AI Lokal.',
     };
   }
   if (/PERMISSION_DENIED|API_KEY_INVALID|403|400/i.test(raw) && /key|permission|api/i.test(raw)) {
     return {
       status: 403,
-      message: 'API key Gemini pada Settings > Secrets tidak valid atau belum aktif.',
+      message: 'API key AI pada konfigurasi server tidak valid atau belum aktif.',
     };
   }
   return {
@@ -231,9 +339,11 @@ function getGeminiErrorResponse(err: unknown, fallbackMessage: string): { status
 }
 
 function getGeminiClient(): GoogleGenAI {
-  const apiKey = process.env.GEMINI_API_KEY;
+  const apiKey = getEffectiveGeminiApiKey();
   if (!apiKey) {
-    throw new Error('GEMINI_API_KEY belum dikonfigurasi pada Settings > Secrets.');
+    throw new Error(
+      'GEMINI_API_KEY belum dikonfigurasi pada Settings > Secrets atau Tab Google Cloud di Panel Admin.'
+    );
   }
   return new GoogleGenAI({
     apiKey,
@@ -278,7 +388,6 @@ function isBlockedHostname(hostname: string): boolean {
 
 function normalizeXmlSourceUrl(rawUrl: string): string {
   const trimmed = rawUrl.trim();
-  // Auto-convert GitHub blob URLs to raw.githubusercontent.com
   const ghBlobMatch = /^https?:\/\/github\.com\/([^/]+)\/([^/]+)\/blob\/(.+)$/i.exec(trimmed);
   if (ghBlobMatch) {
     const [, owner, repo, rest] = ghBlobMatch;
@@ -312,10 +421,7 @@ function convertLiveBlogHtmlToXml(html: string, sourceUrl: string): string {
 
   const bodyMatch = /<body[^>]*>([\s\S]*?)<\/body>/i.exec(html);
   const rawBody = bodyMatch?.[1] || '<div class="post"><h2 class="post-title"><data:post.title/></h2><div class="post-body"><data:post.body/></div></div>';
-
-  // Strip scripts from fetched HTML for safe sandboxed preview
   const safeBody = rawBody.replace(/<script[\s\S]*?<\/script>/gi, '');
-
   const combinedSkin = styleMatches.join('\n\n').replace(/\]\]>/g, ']]&gt;');
 
   return `<?xml version="1.0" encoding="UTF-8" ?>
@@ -339,6 +445,821 @@ ${combinedSkin}
 </body>
 </html>`;
 }
+
+// ==================== AUTH & ADMIN ACCOUNT ROUTES ====================
+
+app.get('/api/auth/me', async (req, res) => {
+  const user = await resolveOptionalUser(req);
+  if (!user) {
+    res.json({ authenticated: false, user: null });
+    return;
+  }
+  const quota = await getUserDailyQuota(user.id, { increment: false });
+  res.json({ authenticated: true, user, quota });
+});
+
+app.post('/api/auth/register', async (req, res) => {
+  try {
+    const email = typeof req.body?.email === 'string' ? req.body.email : '';
+    const displayName = typeof req.body?.displayName === 'string' ? req.body.displayName : '';
+    const password = typeof req.body?.password === 'string' ? req.body.password : '';
+    const user = await registerAppUser({ email, displayName, password });
+    const token = signSessionToken({ sub: user.id, email: user.email, role: user.role });
+    const quota = await getUserDailyQuota(user.id, { increment: false });
+    res.json({ token, user, quota });
+  } catch (err) {
+    res.status(400).json({
+      error: err instanceof Error ? err.message : 'Gagal mendaftarkan akun baru.',
+    });
+  }
+});
+
+app.post('/api/auth/login', async (req, res) => {
+  try {
+    const email = typeof req.body?.email === 'string' ? req.body.email.trim().toLowerCase() : '';
+    const password = typeof req.body?.password === 'string' ? req.body.password : '';
+    if (!email || !password) {
+      res.status(400).json({ error: 'Masukkan email dan password.' });
+      return;
+    }
+
+    const adminStatus = await getAdminAuthStatus();
+    let user: AuthUserSession;
+    if (email === adminStatus.adminEmail.toLowerCase()) {
+      user = await authenticateAdminLogin(email, password);
+    } else {
+      user = await authenticateAppUser(email, password);
+    }
+
+    const token = signSessionToken({ sub: user.id, email: user.email, role: user.role });
+    const quota = await getUserDailyQuota(user.id, { increment: false });
+    res.json({ token, user, quota });
+  } catch (err) {
+    res.status(401).json({
+      error: err instanceof Error ? err.message : 'Email atau password salah.',
+    });
+  }
+});
+
+app.patch('/api/auth/preferences', async (req, res) => {
+  try {
+    const session = await requireAuthenticatedUser(req, res);
+    if (!session) return;
+    if (session.role === 'admin' && session.id === 'admin-primary') {
+      res.json({ ok: true, user: session });
+      return;
+    }
+    const mode =
+      req.body?.preferredMode === 'gemini' || req.body?.preferredMode === 'freellm'
+        ? req.body.preferredMode
+        : 'local';
+    const geminiModel =
+      typeof req.body?.preferredGeminiModel === 'string'
+        ? req.body.preferredGeminiModel.slice(0, 64)
+        : session.preferredGeminiModel;
+    const freellmModel =
+      typeof req.body?.preferredFreeLlmModel === 'string'
+        ? req.body.preferredFreeLlmModel.slice(0, 80)
+        : session.preferredFreeLlmModel;
+
+    await dbRun(
+      `UPDATE app_users
+       SET preferred_mode = ?, preferred_gemini_model = ?, preferred_freellm_model = ?, updated_at_ms = ?
+       WHERE id = ?`,
+      [mode, geminiModel, freellmModel, Date.now(), session.id]
+    );
+    res.json({
+      ok: true,
+      user: {
+        ...session,
+        preferredMode: mode,
+        preferredGeminiModel: geminiModel,
+        preferredFreeLlmModel: freellmModel,
+      },
+    });
+  } catch (err) {
+    res.status(500).json({
+      error: err instanceof Error ? err.message : 'Gagal menyimpan preferensi akun.',
+    });
+  }
+});
+
+app.get('/api/admin/auth/status', async (_req, res) => {
+  try {
+    const status = await getAdminAuthStatus();
+    res.json(status);
+  } catch (err) {
+    res.status(500).json({
+      error: err instanceof Error ? err.message : 'Gagal memeriksa status Admin.',
+    });
+  }
+});
+
+app.post('/api/admin/auth/claim', async (req, res) => {
+  try {
+    const email = typeof req.body?.email === 'string' ? req.body.email : undefined;
+    const displayName = typeof req.body?.displayName === 'string' ? req.body.displayName : undefined;
+    const password = typeof req.body?.password === 'string' ? req.body.password : '';
+    const user = await claimPrimaryAdminAccount({ email, displayName, password });
+    const token = signSessionToken({ sub: user.id, email: user.email, role: 'admin' });
+    res.json({ token, user });
+  } catch (err) {
+    res.status(400).json({
+      error: err instanceof Error ? err.message : 'Gagal membuat akun Admin awal.',
+    });
+  }
+});
+
+app.post('/api/admin/auth/login', async (req, res) => {
+  try {
+    const email = typeof req.body?.email === 'string' ? req.body.email : '';
+    const password = typeof req.body?.password === 'string' ? req.body.password : '';
+    const user = await authenticateAdminLogin(email, password);
+    const token = signSessionToken({ sub: user.id, email: user.email, role: 'admin' });
+    res.json({ token, user });
+  } catch (err) {
+    res.status(401).json({
+      error: err instanceof Error ? err.message : 'Login Admin gagal.',
+    });
+  }
+});
+
+app.post('/api/admin/account/update', async (req, res) => {
+  try {
+    const admin = await requireAdminSession(req, res);
+    if (!admin) return;
+    const currentPassword =
+      typeof req.body?.currentPassword === 'string' ? req.body.currentPassword : '';
+    const newEmail = typeof req.body?.newEmail === 'string' ? req.body.newEmail : admin.email;
+    const newDisplayName =
+      typeof req.body?.newDisplayName === 'string' ? req.body.newDisplayName : admin.displayName;
+    const newPassword =
+      typeof req.body?.newPassword === 'string' ? req.body.newPassword : undefined;
+
+    const updatedUser = await updatePrimaryAdminAccount({
+      currentPassword,
+      newEmail,
+      newDisplayName,
+      newPassword,
+    });
+    const token = signSessionToken({
+      sub: updatedUser.id,
+      email: updatedUser.email,
+      role: 'admin',
+    });
+    res.json({ token, user: updatedUser });
+  } catch (err) {
+    res.status(400).json({
+      error: err instanceof Error ? err.message : 'Gagal memperbarui akun Admin.',
+    });
+  }
+});
+
+app.get('/api/admin/users', async (req, res) => {
+  try {
+    const admin = await requireAdminSession(req, res);
+    if (!admin) return;
+    const searchQ = typeof req.query.q === 'string' ? req.query.q : '';
+    const users = await listManagedUsers(searchQ);
+    res.json({ users });
+  } catch (err) {
+    res.status(500).json({
+      error: err instanceof Error ? err.message : 'Gagal memuat daftar pengguna.',
+    });
+  }
+});
+
+app.put('/api/admin/users/:id/tier', async (req, res) => {
+  try {
+    const admin = await requireAdminSession(req, res);
+    if (!admin) return;
+    const targetId = String(req.params.id || '').trim();
+    const tier = req.body?.tier === 'pro' ? 'pro' : 'free';
+    const rawProPlanId =
+      typeof req.body?.proPlanId === 'string' ? req.body.proPlanId : null;
+    if (!targetId) {
+      res.status(400).json({ error: 'ID pengguna tidak valid.' });
+      return;
+    }
+    const updated = await setAppUserTier(targetId, tier, rawProPlanId);
+    res.json({ ok: true, id: targetId, tier: updated.tier, proPlanId: updated.proPlanId });
+  } catch (err) {
+    res.status(500).json({
+      error: err instanceof Error ? err.message : 'Gagal mengubah tier pengguna.',
+    });
+  }
+});
+
+app.put('/api/admin/users/:id/features', async (req, res) => {
+  try {
+    const admin = await requireAdminSession(req, res);
+    if (!admin) return;
+    const targetId = String(req.params.id || '').trim();
+    if (!targetId) {
+      res.status(400).json({ error: 'ID pengguna tidak valid.' });
+      return;
+    }
+    const featureOverrides = await setAppUserFeatureOverrides(
+      targetId,
+      req.body?.featureOverrides
+    );
+    res.json({ ok: true, id: targetId, featureOverrides });
+  } catch (err) {
+    res.status(400).json({
+      error: err instanceof Error ? err.message : 'Gagal menyimpan akses fitur khusus pengguna.',
+    });
+  }
+});
+
+// ==================== CLOUDFLARE D1 ADMIN MANAGEMENT ROUTES ====================
+
+app.get('/api/admin/d1/config', async (req, res) => {
+  try {
+    const admin = await requireAdminSession(req, res);
+    if (!admin) return;
+    res.json(getD1AdminConfigView());
+  } catch (err) {
+    res.status(500).json({
+      error: err instanceof Error ? err.message : 'Gagal membaca konfigurasi Cloudflare D1.',
+    });
+  }
+});
+
+app.put('/api/admin/d1/config', async (req, res) => {
+  try {
+    const admin = await requireAdminSession(req, res);
+    if (!admin) return;
+    const cur = loadStoredD1Credentials();
+    const workerProxyUrl =
+      typeof req.body?.workerProxyUrl === 'string' ? req.body.workerProxyUrl.trim() : cur.workerProxyUrl;
+    if (workerProxyUrl) {
+      const parsed = new URL(workerProxyUrl);
+      if (!['http:', 'https:'].includes(parsed.protocol) || isBlockedHostname(parsed.hostname)) {
+        res.status(400).json({ error: 'URL Worker Proxy D1 harus publik dan memakai HTTP/HTTPS.' });
+        return;
+      }
+    }
+
+    const nextApiToken = req.body?.clearApiToken
+      ? ''
+      : typeof req.body?.apiToken === 'string' && req.body.apiToken.trim()
+        ? req.body.apiToken.trim()
+        : cur.apiToken;
+
+    saveStoredD1Credentials({
+      ...cur,
+      enabled: Boolean(req.body?.enabled),
+      accountId:
+        typeof req.body?.accountId === 'string' ? req.body.accountId.trim() : cur.accountId,
+      databaseId:
+        typeof req.body?.databaseId === 'string' ? req.body.databaseId.trim() : cur.databaseId,
+      databaseName:
+        typeof req.body?.databaseName === 'string' && req.body.databaseName.trim()
+          ? req.body.databaseName.trim()
+          : cur.databaseName,
+      bindingName:
+        typeof req.body?.bindingName === 'string' && req.body.bindingName.trim()
+          ? req.body.bindingName.trim()
+          : cur.bindingName,
+      workerProxyUrl,
+      apiToken: nextApiToken,
+      updatedAtMs: Date.now(),
+    });
+    res.json(getD1AdminConfigView());
+  } catch (err) {
+    res.status(400).json({
+      error: err instanceof Error ? err.message : 'Gagal menyimpan konfigurasi Cloudflare D1.',
+    });
+  }
+});
+
+app.post('/api/admin/d1/test', async (req, res) => {
+  try {
+    const admin = await requireAdminSession(req, res);
+    if (!admin) return;
+    const result = await testCloudflareD1Connection({
+      accountId: typeof req.body?.accountId === 'string' ? req.body.accountId : undefined,
+      databaseId: typeof req.body?.databaseId === 'string' ? req.body.databaseId : undefined,
+      workerProxyUrl:
+        typeof req.body?.workerProxyUrl === 'string' ? req.body.workerProxyUrl : undefined,
+      apiToken: typeof req.body?.apiToken === 'string' ? req.body.apiToken : undefined,
+    });
+    res.json({ ...result, config: getD1AdminConfigView() });
+  } catch (err) {
+    res.status(500).json({
+      ok: false,
+      message: err instanceof Error ? err.message : 'Gagal menguji koneksi D1.',
+    });
+  }
+});
+
+app.post('/api/admin/d1/init-schema', async (req, res) => {
+  try {
+    const admin = await requireAdminSession(req, res);
+    if (!admin) return;
+    const result = await initializeRemoteD1SchemaNow();
+    res.json(result);
+  } catch (err) {
+    res.status(400).json({
+      ok: false,
+      error: err instanceof Error ? err.message : 'Gagal menginisialisasi tabel Cloudflare D1.',
+    });
+  }
+});
+
+app.post(['/api/admin/d1/sync-local', '/api/admin/d1/sync-local-to-remote'], async (req, res) => {
+  try {
+    const admin = await requireAdminSession(req, res);
+    if (!admin) return;
+    const result = await syncLocalSqliteToRemoteD1();
+    res.json({
+      ok: true,
+      message: 'Data lokal berhasil disinkronkan ke Cloudflare D1.',
+      ...result,
+    });
+  } catch (err) {
+    res.status(400).json({
+      ok: false,
+      error: err instanceof Error ? err.message : 'Gagal menyinkronkan data ke Cloudflare D1.',
+    });
+  }
+});
+
+// ==================== PUBLIC & ADMIN CONFIG (ADSENSE, SEO, PREMIUM, FREELLM) ====================
+
+app.get('/api/config/public', async (req, res) => {
+  try {
+    const optionalUser = await resolveOptionalUser(req);
+    const isAdmin = optionalUser?.role === 'admin';
+    const [adsense, units, seo, premium, payment, freellmCfg, gcloudCfg] = await Promise.all([
+      getSiteAdsenseConfig(),
+      listAdsenseUnits(!isAdmin),
+      getSiteSeoConfig(),
+      getPremiumSettingsConfig(),
+      getPaymentSettingsConfig(),
+      loadFreeLlmConfig(),
+      loadGoogleCloudConfig(),
+    ]);
+
+    res.json({
+      dbMode: getActiveDbMode(),
+      adsense,
+      units,
+      seo,
+      premium,
+      payment,
+      freellm: getFreeLlmPublicStatus(freellmCfg),
+      gcloud: getGoogleCloudPublicStatus(gcloudCfg),
+    });
+  } catch (err) {
+    res.status(500).json({
+      error: err instanceof Error ? err.message : 'Gagal memuat konfigurasi situs.',
+    });
+  }
+});
+
+app.put('/api/admin/adsense/config', async (req, res) => {
+  try {
+    const admin = await requireAdminSession(req, res);
+    if (!admin) return;
+    const saved = await saveSiteAdsenseConfig(req.body || {}, admin.email, admin.id);
+    adsTxtCache = null;
+    res.json({ config: saved });
+  } catch (err) {
+    res.status(400).json({
+      error: err instanceof Error ? err.message : 'Gagal menyimpan pengaturan AdSense.',
+    });
+  }
+});
+
+app.post('/api/admin/adsense/units', async (req, res) => {
+  try {
+    const admin = await requireAdminSession(req, res);
+    if (!admin) return;
+    const name = String(req.body?.name || '').trim().slice(0, ADSENSE_FIELD_LIMITS.unitNameMax);
+    if (!name) {
+      res.status(400).json({ error: 'Nama unit iklan wajib diisi.' });
+      return;
+    }
+    const id = `ad_${crypto.randomUUID().replace(/-/g, '').slice(0, 20)}`;
+    const now = Date.now();
+    const slotId = sanitizeSlotDigits(String(req.body?.slotId || ''));
+    const format: AdsenseUnitFormatType =
+      req.body?.format === 'leaderboard' ||
+      req.body?.format === 'sidebar' ||
+      req.body?.format === 'in-article' ||
+      req.body?.format === 'multiplex'
+        ? req.body.format
+        : 'responsive';
+    const placement: AdsenseUnitPlacementType =
+      req.body?.placement === 'topBanner' ||
+      req.body?.placement === 'sidebarSlot' ||
+      req.body?.placement === 'footerSlot' ||
+      req.body?.placement === 'modalSlot'
+        ? req.body.placement
+        : 'bloggerTemplate';
+    const enabled = req.body?.enabled !== false;
+    const onlyOnPosts = Boolean(req.body?.onlyOnPosts);
+    const notes = String(req.body?.notes || '').trim().slice(0, ADSENSE_FIELD_LIMITS.unitNotesMax);
+
+    await dbRun(
+      `INSERT INTO adsense_units (id, name, slot_id, format, placement, enabled, only_on_posts, notes, created_by_uid, created_at_ms, updated_at_ms)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [id, name, slotId, format, placement, enabled ? 1 : 0, onlyOnPosts ? 1 : 0, notes, admin.id, now, now]
+    );
+    const units = await listAdsenseUnits(false);
+    res.json({ units });
+  } catch (err) {
+    res.status(500).json({
+      error: err instanceof Error ? err.message : 'Gagal menambahkan unit iklan.',
+    });
+  }
+});
+
+app.put('/api/admin/adsense/units/:id', async (req, res) => {
+  try {
+    const admin = await requireAdminSession(req, res);
+    if (!admin) return;
+    const unitId = String(req.params.id || '').trim();
+    const name = String(req.body?.name || '').trim().slice(0, ADSENSE_FIELD_LIMITS.unitNameMax);
+    if (!unitId || !name) {
+      res.status(400).json({ error: 'ID dan nama unit iklan wajib diisi.' });
+      return;
+    }
+    const slotId = sanitizeSlotDigits(String(req.body?.slotId || ''));
+    const format: AdsenseUnitFormatType =
+      req.body?.format === 'leaderboard' ||
+      req.body?.format === 'sidebar' ||
+      req.body?.format === 'in-article' ||
+      req.body?.format === 'multiplex'
+        ? req.body.format
+        : 'responsive';
+    const placement: AdsenseUnitPlacementType =
+      req.body?.placement === 'topBanner' ||
+      req.body?.placement === 'sidebarSlot' ||
+      req.body?.placement === 'footerSlot' ||
+      req.body?.placement === 'modalSlot'
+        ? req.body.placement
+        : 'bloggerTemplate';
+    const enabled = Boolean(req.body?.enabled);
+    const onlyOnPosts = Boolean(req.body?.onlyOnPosts);
+    const notes = String(req.body?.notes || '').trim().slice(0, ADSENSE_FIELD_LIMITS.unitNotesMax);
+
+    await dbRun(
+      `UPDATE adsense_units
+       SET name = ?, slot_id = ?, format = ?, placement = ?, enabled = ?, only_on_posts = ?, notes = ?, updated_at_ms = ?
+       WHERE id = ?`,
+      [name, slotId, format, placement, enabled ? 1 : 0, onlyOnPosts ? 1 : 0, notes, Date.now(), unitId]
+    );
+    const units = await listAdsenseUnits(false);
+    res.json({ units });
+  } catch (err) {
+    res.status(500).json({
+      error: err instanceof Error ? err.message : 'Gagal mengubah unit iklan.',
+    });
+  }
+});
+
+app.delete('/api/admin/adsense/units/:id', async (req, res) => {
+  try {
+    const admin = await requireAdminSession(req, res);
+    if (!admin) return;
+    const unitId = String(req.params.id || '').trim();
+    await dbRun('DELETE FROM adsense_units WHERE id = ?', [unitId]);
+    const units = await listAdsenseUnits(false);
+    res.json({ units });
+  } catch (err) {
+    res.status(500).json({
+      error: err instanceof Error ? err.message : 'Gagal menghapus unit iklan.',
+    });
+  }
+});
+
+app.put('/api/admin/seo', async (req, res) => {
+  try {
+    const admin = await requireAdminSession(req, res);
+    if (!admin) return;
+    const seo = await saveSiteSeoConfig(req.body || {}, admin.email);
+    res.json({ seo });
+  } catch (err) {
+    res.status(400).json({
+      error: err instanceof Error ? err.message : 'Gagal menyimpan pengaturan SEO.',
+    });
+  }
+});
+
+app.put('/api/admin/premium', async (req, res) => {
+  try {
+    const admin = await requireAdminSession(req, res);
+    if (!admin) return;
+    const premium = await savePremiumSettingsConfig(req.body || {}, admin.email);
+    res.json({ premium });
+  } catch (err) {
+    res.status(400).json({
+      error: err instanceof Error ? err.message : 'Gagal menyimpan pengaturan Fitur Premium.',
+    });
+  }
+});
+
+app.put('/api/admin/payment', async (req, res) => {
+  try {
+    const admin = await requireAdminSession(req, res);
+    if (!admin) return;
+    const payment = await savePaymentSettingsConfig(req.body || {}, admin.email);
+    res.json({ payment });
+  } catch (err) {
+    res.status(400).json({
+      error: err instanceof Error ? err.message : 'Gagal menyimpan pengaturan Alat Pembayaran Manual.',
+    });
+  }
+});
+
+// ==================== FREELLMAPI ADMIN & RUNTIME ROUTES ====================
+
+app.get('/api/ai/freellm/models', async (_req, res) => {
+  const cfg = await loadFreeLlmConfig();
+  res.json({
+    models: FREELLM_MODELS,
+    status: getFreeLlmPublicStatus(cfg),
+  });
+});
+
+app.get('/api/admin/freellm/config', async (req, res) => {
+  const admin = await requireAdminSession(req, res);
+  if (!admin) return;
+  const cfg = await loadFreeLlmConfig();
+  res.json(toFreeLlmAdminView(cfg));
+});
+
+app.put('/api/admin/freellm/config', async (req, res) => {
+  try {
+    const admin = await requireAdminSession(req, res);
+    if (!admin) return;
+    const updated = await saveFreeLlmConfig(req.body || {});
+    const full = await loadFreeLlmConfig();
+    res.json({ adminView: updated, publicStatus: getFreeLlmPublicStatus(full) });
+  } catch (err) {
+    res.status(400).json({
+      error: err instanceof Error ? err.message : 'Gagal menyimpan konfigurasi FreeLLMAPI.',
+    });
+  }
+});
+
+app.post('/api/admin/freellm/test', async (req, res) => {
+  const admin = await requireAdminSession(req, res);
+  if (!admin) return;
+  const result = await testFreeLlmGateway();
+  res.json(result);
+});
+
+// ==================== GOOGLE CLOUD CONSOLE ADMIN ROUTES ====================
+
+app.get('/api/admin/gcloud/config', async (req, res) => {
+  try {
+    const admin = await requireAdminSession(req, res);
+    if (!admin) return;
+    const cfg = await loadGoogleCloudConfig();
+    res.json({ config: toGoogleCloudAdminView(cfg) });
+  } catch (err) {
+    res.status(500).json({
+      error: err instanceof Error ? err.message : 'Gagal membaca konfigurasi Google Cloud Console.',
+    });
+  }
+});
+
+app.put('/api/admin/gcloud/config', async (req, res) => {
+  try {
+    const admin = await requireAdminSession(req, res);
+    if (!admin) return;
+    const updatedView = await saveGoogleCloudConfig(req.body || {});
+    const full = await loadGoogleCloudConfig();
+    res.json({
+      config: updatedView,
+      publicStatus: getGoogleCloudPublicStatus(full),
+    });
+  } catch (err) {
+    res.status(400).json({
+      error: err instanceof Error ? err.message : 'Gagal menyimpan konfigurasi Google Cloud Console.',
+    });
+  }
+});
+
+app.post('/api/admin/gcloud/test', async (req, res) => {
+  try {
+    const admin = await requireAdminSession(req, res);
+    if (!admin) return;
+    const result = await testGoogleCloudConnection();
+    res.json(result);
+  } catch (err) {
+    res.status(500).json({
+      ok: false,
+      message: err instanceof Error ? err.message : 'Gagal menguji koneksi Google Cloud Console.',
+    });
+  }
+});
+
+// ==================== USER CLOUD NOTEPAD & CHAT PERSISTENCE IN D1 ====================
+
+app.get('/api/notes', async (req, res) => {
+  try {
+    const user = await requireAuthenticatedUser(req, res);
+    if (!user) return;
+    const rows = await dbAll<{
+      id: string;
+      title: string;
+      content: string;
+      tag: string;
+      pinned: number;
+      template_hint: string;
+      created_at_ms: number;
+      updated_at_ms: number;
+    }>(
+      'SELECT id, title, content, tag, pinned, template_hint, created_at_ms, updated_at_ms FROM user_notes WHERE user_id = ? ORDER BY pinned DESC, updated_at_ms DESC LIMIT 120',
+      [user.id]
+    );
+    res.json({
+      notes: rows.map((r) => ({
+        id: r.id,
+        title: r.title,
+        content: r.content,
+        tag: r.tag,
+        pinned: Boolean(r.pinned),
+        templateHint: r.template_hint,
+        createdAtMs: r.created_at_ms,
+        updatedAtMs: r.updated_at_ms,
+      })),
+    });
+  } catch (err) {
+    res.status(500).json({
+      error: err instanceof Error ? err.message : 'Gagal memuat catatan dari D1.',
+    });
+  }
+});
+
+app.put('/api/notes/:id', async (req, res) => {
+  try {
+    const user = await requireAuthenticatedUser(req, res);
+    if (!user) return;
+    const rawId = String(req.params.id || '').trim();
+    if (!/^[a-zA-Z0-9_-]{1,128}$/.test(rawId)) {
+      res.status(400).json({ error: 'ID catatan tidak valid.' });
+      return;
+    }
+    const existing = await dbGet<{ user_id: string; created_at_ms: number }>(
+      'SELECT user_id, created_at_ms FROM user_notes WHERE id = ?',
+      [rawId]
+    );
+    if (existing && existing.user_id !== user.id) {
+      res.status(403).json({ error: 'Anda tidak memiliki izin mengubah catatan ini.' });
+      return;
+    }
+    const now = Date.now();
+    const title = String(req.body?.title || 'Catatan Tanpa Judul').trim().slice(0, 160) || 'Catatan Tanpa Judul';
+    const content = String(req.body?.content || '').slice(0, 50000);
+    const tag = ['umum', 'xml', 'css', 'url', 'ide'].includes(String(req.body?.tag))
+      ? String(req.body.tag)
+      : 'umum';
+    const pinned = req.body?.pinned ? 1 : 0;
+    const templateHint = String(req.body?.templateHint || '').slice(0, 120);
+    const createdAtMs = existing?.created_at_ms || now;
+
+    await dbRun(
+      `INSERT INTO user_notes (id, user_id, title, content, tag, pinned, template_hint, created_at_ms, updated_at_ms)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(id) DO UPDATE SET
+         title=excluded.title,
+         content=excluded.content,
+         tag=excluded.tag,
+         pinned=excluded.pinned,
+         template_hint=excluded.template_hint,
+         updated_at_ms=excluded.updated_at_ms`,
+      [rawId, user.id, title, content, tag, pinned, templateHint, createdAtMs, now]
+    );
+
+    res.json({
+      note: {
+        id: rawId,
+        title,
+        content,
+        tag,
+        pinned: Boolean(pinned),
+        templateHint,
+        createdAtMs,
+        updatedAtMs: now,
+      },
+    });
+  } catch (err) {
+    res.status(500).json({
+      error: err instanceof Error ? err.message : 'Gagal menyimpan catatan ke D1.',
+    });
+  }
+});
+
+app.delete('/api/notes/:id', async (req, res) => {
+  try {
+    const user = await requireAuthenticatedUser(req, res);
+    if (!user) return;
+    const rawId = String(req.params.id || '').trim();
+    await dbRun('DELETE FROM user_notes WHERE id = ? AND user_id = ?', [rawId, user.id]);
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({
+      error: err instanceof Error ? err.message : 'Gagal menghapus catatan dari D1.',
+    });
+  }
+});
+
+app.get('/api/chat-messages', async (req, res) => {
+  try {
+    const user = await requireAuthenticatedUser(req, res);
+    if (!user) return;
+    const rows = await dbAll<{
+      id: string;
+      role: string;
+      content: string;
+      engine_label: string;
+      model_id: string;
+      suggested_css: string;
+      page_context: string;
+      created_at_ms: number;
+    }>(
+      'SELECT id, role, content, engine_label, model_id, suggested_css, page_context, created_at_ms FROM user_chat_messages WHERE user_id = ? ORDER BY created_at_ms ASC LIMIT 100',
+      [user.id]
+    );
+    res.json({
+      messages: rows.map((r) => ({
+        id: r.id,
+        role: r.role === 'assistant' ? 'assistant' : 'user',
+        content: r.content,
+        engineLabel: r.engine_label,
+        modelId: r.model_id,
+        suggestedCss: r.suggested_css || undefined,
+        pageContext: r.page_context,
+        createdAtMs: r.created_at_ms,
+      })),
+    });
+  } catch (err) {
+    res.status(500).json({
+      error: err instanceof Error ? err.message : 'Gagal memuat riwayat chat AI.',
+    });
+  }
+});
+
+app.post('/api/chat-messages', async (req, res) => {
+  try {
+    const user = await requireAuthenticatedUser(req, res);
+    if (!user) return;
+    const items = Array.isArray(req.body?.messages) ? req.body.messages.slice(0, 4) : [];
+    const saved: Array<Record<string, unknown>> = [];
+    for (const item of items) {
+      if (!item || typeof item.content !== 'string') continue;
+      const id = `msg_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
+      const role = item.role === 'assistant' ? 'assistant' : 'user';
+      const content = item.content.slice(0, 12000);
+      const engineLabel = String(item.engineLabel || 'AI').slice(0, 100);
+      const modelId = String(item.modelId || 'auto').slice(0, 64);
+      const suggestedCss = typeof item.suggestedCss === 'string' ? item.suggestedCss.slice(0, 6000) : '';
+      const pageContext = String(item.pageContext || 'preview').slice(0, 32);
+      const createdAtMs = typeof item.createdAtMs === 'number' ? item.createdAtMs : Date.now();
+
+      await dbRun(
+        `INSERT INTO user_chat_messages (id, user_id, role, content, engine_label, model_id, suggested_css, page_context, created_at_ms)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [id, user.id, role, content, engineLabel, modelId, suggestedCss, pageContext, createdAtMs]
+      );
+      saved.push({
+        id,
+        role,
+        content,
+        engineLabel,
+        modelId,
+        suggestedCss: suggestedCss || undefined,
+        pageContext,
+        createdAtMs,
+      });
+    }
+    res.json({ saved });
+  } catch (err) {
+    res.status(500).json({
+      error: err instanceof Error ? err.message : 'Gagal menyimpan riwayat chat AI.',
+    });
+  }
+});
+
+app.delete('/api/chat-messages', async (req, res) => {
+  try {
+    const user = await requireAuthenticatedUser(req, res);
+    if (!user) return;
+    await dbRun('DELETE FROM user_chat_messages WHERE user_id = ?', [user.id]);
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({
+      error: err instanceof Error ? err.message : 'Gagal membersihkan riwayat chat AI.',
+    });
+  }
+});
+
+// ==================== BLOGGER URL / QUERY / SEO SUBMIT ROUTES ====================
 
 // 1. Fetch XML from URL (bypassing browser CORS)
 app.post('/api/fetch-xml', async (req, res) => {
@@ -406,7 +1327,6 @@ app.post('/api/fetch-xml', async (req, res) => {
       return;
     }
 
-    // If it's a live Blogspot/HTML page, convert it into an editable preview wrapper
     if (text.includes('<html') || text.includes('<body') || contentType.includes('text/html')) {
       const convertedXml = convertLiveBlogHtmlToXml(text, parsedUrl.toString());
       const visualPreviewHtml = buildSafeVisualIframeHtml(text, parsedUrl.toString());
@@ -454,7 +1374,6 @@ function buildSafeVisualIframeHtml(html: string, sourceUrl: string): string {
   }
 
   let safe = html
-    // Remove scripts, meta refresh/frame headers, prefetch hints, autoplay media, and inline event handlers
     .replace(/<script\b[\s\S]*?<\/script>/gi, '')
     .replace(/<noscript\b[^>]*>|<\/noscript>/gi, '')
     .replace(/<meta\b[^>]*http-equiv=["']?(?:X-Frame-Options|Content-Security-Policy|refresh)["']?[^>]*>/gi, '')
@@ -496,7 +1415,6 @@ function extractLiveBlogFingerprint(html: string, sourceUrl: string) {
   const isBloggerPowered =
     /blogger\.com\/static|blogspot\.com|_WidgetManager|widget-content|data-version=/i.test(html);
 
-  // Extract theme/skin name if commented inside <style>
   const styleBlocks: string[] = [];
   const styleBlockRegex = /<style\b[^>]*>([\s\S]*?)<\/style>/gi;
   let m: RegExpExecArray | null;
@@ -509,7 +1427,6 @@ function extractLiveBlogFingerprint(html: string, sourceUrl: string) {
   );
   const skinThemeName = (skinNameMatch?.[1] || '').trim();
 
-  // Extract section IDs + sequential widget placements
   const sectionMatches: Array<{ id: string; index: number }> = [];
   const secTagRegex = /<(?:div|section|header|footer|aside|main)\b([^>]*\bclass=["'][^"']*\bsection\b[^"']*["'][^>]*)>/gi;
   while ((m = secTagRegex.exec(html)) !== null) {
@@ -539,7 +1456,6 @@ function extractLiveBlogFingerprint(html: string, sourceUrl: string) {
         : classes.find((c) => c !== 'widget') || 'Unknown';
     widgets.push({ id: wId, type: wType });
 
-    // Nearest preceding section container
     let parentSec = '';
     for (let i = sectionMatches.length - 1; i >= 0; i--) {
       if (sectionMatches[i].index < m.index) {
@@ -550,7 +1466,6 @@ function extractLiveBlogFingerprint(html: string, sourceUrl: string) {
     widgetPlacements.push({ sectionId: parentSec, widgetId: wId, widgetType: wType });
   }
 
-  // Extract CSS Custom Properties (--var)
   const cssVarNames = new Set<string>();
   const cssVarRegex = /(--[a-zA-Z0-9_-]{2,})\s*:/g;
   while ((m = cssVarRegex.exec(html)) !== null) {
@@ -558,7 +1473,6 @@ function extractLiveBlogFingerprint(html: string, sourceUrl: string) {
     cssVarNames.add(m[1]);
   }
 
-  // Extract Forensic Theme Signature Tokens (custom CSS selectors & body class/IDs)
   const sigCounts = new Map<string, number>();
   const selectorRegex = /(?:^|[\s,}])([.#][a-zA-Z_-][a-zA-Z0-9_-]{2,})/g;
   while ((m = selectorRegex.exec(combinedCss)) !== null) {
@@ -588,7 +1502,6 @@ function extractLiveBlogFingerprint(html: string, sourceUrl: string) {
     .slice(0, 120)
     .map(([tok]) => tok);
 
-  // Extract Font Families used in CSS & Google Fonts links
   const fontSet = new Set<string>();
   const fontCssRegex = /font-family\s*:\s*([^;}{]+)/gi;
   while ((m = fontCssRegex.exec(combinedCss)) !== null) {
@@ -604,12 +1517,11 @@ function extractLiveBlogFingerprint(html: string, sourceUrl: string) {
       try {
         fontSet.add(decodeURIComponent(fm[1].replace(/\+/g, ' ')).split(':')[0].toLowerCase().trim());
       } catch {
-        // ignore malformed font url
+        // ignore
       }
     }
   }
 
-  // Extract footer snippet
   const footerMatch =
     /<footer\b[^>]*>([\s\S]{0,1200})<\/footer>/i.exec(html) ||
     /<div\b[^>]*id=["']footer[^"']*["'][^>]*>([\s\S]{0,1200})<\/div>/i.exec(html);
@@ -650,7 +1562,6 @@ function extractLiveBlogFingerprint(html: string, sourceUrl: string) {
   };
 }
 
-// 1b. Compare a live Blogspot URL against currently edited template
 app.post('/api/compare-blogspot-url', async (req, res) => {
   try {
     const rawUrl = typeof req.body?.url === 'string' ? req.body.url.trim() : '';
@@ -712,7 +1623,6 @@ app.post('/api/compare-blogspot-url', async (req, res) => {
   }
 });
 
-// 1b-2. Test a URL + Query String / Query Parameters live for Konsol URL
 app.post('/api/test-query-url', async (req, res) => {
   try {
     const rawUrl = typeof req.body?.url === 'string' ? req.body.url.trim() : '';
@@ -789,7 +1699,6 @@ app.post('/api/test-query-url', async (req, res) => {
     const latencyMs = Date.now() - t0;
     const contentType = response.headers.get('content-type') || 'unknown';
 
-    // Read up to 256 KB safely
     const reader = response.body?.getReader();
     let totalBytes = 0;
     const chunks: Uint8Array[] = [];
@@ -840,7 +1749,7 @@ app.post('/api/test-query-url', async (req, res) => {
           }
         }
       } catch {
-        // Non-strict JSON / JSONP response
+        // Non-strict JSON
       }
     }
 
@@ -883,7 +1792,6 @@ function escapeXmlEntity(str: string): string {
     .replace(/'/g, '&apos;');
 }
 
-// 1c. Real external SEO URL verification, WebSub (PubSubHubbub), Ping-O-Matic, Wayback & IndexNow submission
 app.post('/api/seo/submit-url', async (req, res) => {
   try {
     const rawBlogUrl = typeof req.body?.blogUrl === 'string' ? req.body.blogUrl.trim() : '';
@@ -929,7 +1837,7 @@ app.post('/api/seo/submit-url', async (req, res) => {
           targetUrl = parsedArt.toString();
         }
       } catch {
-        // Fallback cleanly to blog origin if article URL malformed
+        // Fallback
       }
     }
 
@@ -965,7 +1873,6 @@ app.post('/api/seo/submit-url', async (req, res) => {
       summary: string;
     }
 
-    // 1) Live external blog, sitemap.xml, and robots.txt verification
     let blogStatus: number | null = null;
     let sitemapStatus: number | null = null;
     let robotsStatus: number | null = null;
@@ -1028,7 +1935,6 @@ app.post('/api/seo/submit-url', async (req, res) => {
       summary: `Blog HTTP ${blogStatus ?? 'Gagal'} · Sitemap.xml HTTP ${sitemapStatus ?? 'Gagal'} (${sitemapUrlCount} URL ditemukan) · robots.txt HTTP ${robotsStatus ?? 'Gagal'}${hasGoogleVerificationMeta ? ' · Meta GSC terpasang' : ''}`,
     });
 
-    // 2) Google Official WebSub / PubSubHubbub Hub
     const webSubStart = Date.now();
     try {
       const wsResp = await timedFetch('https://pubsubhubbub.appspot.com/', {
@@ -1067,7 +1973,6 @@ app.post('/api/seo/submit-url', async (req, res) => {
       });
     }
 
-    // 3) Ping-O-Matic XML-RPC Blog Update Ping (dispatches to multiple external blog search aggregators)
     const pingStart = Date.now();
     try {
       const xmlRpcPayload = `<?xml version="1.0"?>
@@ -1114,7 +2019,6 @@ app.post('/api/seo/submit-url', async (req, res) => {
       });
     }
 
-    // 4) Internet Archive Wayback Machine Snapshot Save
     const wbStart = Date.now();
     const wbEndpoint = `https://web.archive.org/save/${targetUrl}`;
     try {
@@ -1155,7 +2059,6 @@ app.post('/api/seo/submit-url', async (req, res) => {
       });
     }
 
-    // 5) Real IndexNow API (Bing + Yandex + Seznam + Naver) when user provides custom domain key
     if (indexNowKey) {
       const idxEndpoints = [
         { id: 'indexnow-global', name: 'IndexNow Global Hub', url: 'https://api.indexnow.org/indexnow' },
@@ -1231,17 +2134,20 @@ app.post('/api/seo/submit-url', async (req, res) => {
   }
 });
 
-// 1b. Check per-account Gemini quota status
+// ==================== UNIFIED AI ROUTES (FREELLMAPI + GEMINI) ====================
+
 app.post('/api/ai/quota-status', async (req, res) => {
-  const verified = await verifyAndChargeGeminiRequest(req, res, { consumeQuota: false });
+  const verified = await resolveAiExecutionRequest(req, res, { consumeQuota: false });
   if (!verified) return;
-  res.json({ quota: verified.quota, model: verified.model });
+  res.json({
+    quota: verified.quota,
+    model: verified.engine === 'freellm' ? verified.freellmModel : verified.geminiModel,
+  });
 });
 
-// 2. AI Theme Designer (Palette + Fonts + Variable Updates + Custom CSS)
 app.post('/api/ai/generate-theme', async (req, res) => {
   try {
-    const verified = await verifyAndChargeGeminiRequest(req, res);
+    const verified = await resolveAiExecutionRequest(req, res);
     if (!verified) return;
 
     const prompt = typeof req.body?.prompt === 'string' ? req.body.prompt.trim() : '';
@@ -1252,8 +2158,6 @@ app.post('/api/ai/generate-theme', async (req, res) => {
       return;
     }
 
-    const ai = getGeminiClient();
-
     const varListText = currentVariables
       .slice(0, 60)
       .map((v: { name?: string; description?: string; type?: string; value?: string }) =>
@@ -1261,9 +2165,7 @@ app.post('/api/ai/generate-theme', async (req, res) => {
       )
       .join('\n');
 
-    const response = await ai.models.generateContent({
-      model: verified.model,
-      contents: `Rancang tema Blogspot berdasarkan permintaan pengguna berikut:
+    const userPrompt = `Rancang tema Blogspot berdasarkan permintaan pengguna berikut:
 "${prompt}"
 
 Variabel XML yang tersedia di template saat ini:
@@ -1271,18 +2173,42 @@ ${varListText || '(Tidak ada variabel XML khusus, gunakan palet global dan custo
 
 Aturan desain wajib:
 1. Pastikan rasio kontras teks terhadap latar belakang memenuhi WCAG AA (minimal 4.5:1).
-2. Pilih kombinasi 1 font judul (headingFont) dan 1 font isi (bodyFont) dari daftar Google Fonts populer seperti: Plus Jakarta Sans, DM Sans, Outfit, Bricolage Grotesque, Playfair Display, Fraunces, Cormorant Garamond, Lora, Source Serif 4, Merriweather, Manrope, Work Sans, Oswald, JetBrains Mono.
-3. Jika ada variabel XML bertipe color yang cocok (misalnya background, text, link, accent, header), masukkan ke variableUpdates dengan nilai hex #RRGGBB yang valid.
-4. Sertakan customCss singkat yang bersih untuk mempercantik tombol, kartu artikel, kutipan, dan navigasi sesuai nuansa yang diminta (tanpa merusak tata letak responsif).
-5. Berikan rationale singkat dalam bahasa Indonesia yang jelas.`,
+2. Pilih kombinasi 1 font judul (headingFont) dan 1 font isi (bodyFont) dari Google Fonts seperti: Plus Jakarta Sans, DM Sans, Outfit, Bricolage Grotesque, Playfair Display, Fraunces, Lora, Manrope, JetBrains Mono.
+3. Kembalikan JSON valid berisi:
+   - themeName: string
+   - rationale: string (Bahasa Indonesia)
+   - colors: { background, surface, primary, heading, text, mutedText, link, headerBg, headerText, border } (semua hex #RRGGBB)
+   - fonts: { headingFont, bodyFont, baseFontSize, lineHeight, headingWeight, borderRadius }
+   - variableUpdates: [{ name, value }]
+   - customCss: string (tanpa tag <style>)`;
+
+    if (verified.engine === 'freellm') {
+      const llmRes = await callFreeLlmJson<Record<string, unknown>>({
+        systemInstruction:
+          'Anda adalah desainer UI/UX dan pakar template XML Blogger/Blogspot profesional.',
+        userPrompt,
+        requestedModel: verified.freellmModel,
+      });
+      res.json({
+        ...llmRes.data,
+        modelUsed: llmRes.modelUsed,
+        providerUsed: llmRes.providerUsed,
+      });
+      return;
+    }
+
+    const ai = getGeminiClient();
+    const response = await ai.models.generateContent({
+      model: verified.geminiModel,
+      contents: userPrompt,
       config: {
         systemInstruction: 'Anda adalah desainer UI/UX dan pakar template XML Blogger/Blogspot profesional. Jawab selalu dalam JSON terstruktur sesuai skema.',
         responseMimeType: 'application/json',
         responseSchema: {
           type: Type.OBJECT,
           properties: {
-            themeName: { type: Type.STRING, description: 'Nama singkat konsep tema dalam Bahasa Indonesia' },
-            rationale: { type: Type.STRING, description: 'Penjelasan singkat pemilihan warna dan font' },
+            themeName: { type: Type.STRING },
+            rationale: { type: Type.STRING },
             colors: {
               type: Type.OBJECT,
               properties: {
@@ -1330,7 +2256,7 @@ Aturan desain wajib:
     });
 
     const data = JSON.parse((response.text ?? '{}').trim());
-    res.json({ ...data, modelUsed: verified.model, quota: verified.quota });
+    res.json({ ...data, modelUsed: verified.geminiModel, quota: verified.quota });
   } catch (err) {
     console.error('AI generate-theme error:', err);
     const formatted = getGeminiErrorResponse(err, 'Gagal menghasilkan tema AI.');
@@ -1338,10 +2264,9 @@ Aturan desain wajib:
   }
 });
 
-// 3. AI Natural-Language CSS Modifier
 app.post('/api/ai/custom-css', async (req, res) => {
   try {
-    const verified = await verifyAndChargeGeminiRequest(req, res);
+    const verified = await resolveAiExecutionRequest(req, res);
     if (!verified) return;
 
     const instruction = typeof req.body?.instruction === 'string' ? req.body.instruction.trim() : '';
@@ -1353,11 +2278,7 @@ app.post('/api/ai/custom-css', async (req, res) => {
       return;
     }
 
-    const ai = getGeminiClient();
-
-    const response = await ai.models.generateContent({
-      model: verified.model,
-      contents: `Instruksi pengguna untuk memodifikasi tampilan template Blogspot:
+    const userPrompt = `Instruksi pengguna untuk memodifikasi tampilan template Blogspot:
 "${instruction}"
 
 Konteks struktur template saat ini:
@@ -1366,17 +2287,34 @@ ${templateSummary}
 CSS kustom yang sudah ada sebelumnya:
 ${currentCustomCss || '(Kosong)'}
 
-Tugas Anda:
-Hasilkan kode CSS lengkap yang menggabungkan penyesuaian sebelumnya (kecuali jika bertentangan dengan instruksi baru) dengan aturan CSS baru yang rapi dan responsif untuk elemen Blogger standar (.Header, .PageList, .post-outer, .post, .post-title, .post-body, .jump-link a, .sidebar-container .widget, .Label a, .PopularPosts, .footer-outer).
-Jangan sertakan tag <style> atau </style>. Kembalikan CSS murni dan ringkasan perubahan dalam Bahasa Indonesia.`,
+Hasilkan JSON: { "css": string (tanpa <style>), "explanation": string Bahasa Indonesia }.`;
+
+    if (verified.engine === 'freellm') {
+      const llmRes = await callFreeLlmJson<Record<string, unknown>>({
+        systemInstruction: 'Anda adalah front-end engineer spesialis tema Blogger/Blogspot.',
+        userPrompt,
+        requestedModel: verified.freellmModel,
+      });
+      res.json({
+        ...llmRes.data,
+        modelUsed: llmRes.modelUsed,
+        providerUsed: llmRes.providerUsed,
+      });
+      return;
+    }
+
+    const ai = getGeminiClient();
+    const response = await ai.models.generateContent({
+      model: verified.geminiModel,
+      contents: userPrompt,
       config: {
         systemInstruction: 'Anda adalah front-end engineer spesialis tema Blogger/Blogspot. Kembalikan JSON valid.',
         responseMimeType: 'application/json',
         responseSchema: {
           type: Type.OBJECT,
           properties: {
-            css: { type: Type.STRING, description: 'Kode CSS siap pakai tanpa tag <style>' },
-            explanation: { type: Type.STRING, description: 'Penjelasan singkat perubahan CSS dalam Bahasa Indonesia' },
+            css: { type: Type.STRING },
+            explanation: { type: Type.STRING },
           },
           required: ['css', 'explanation'],
         },
@@ -1384,7 +2322,7 @@ Jangan sertakan tag <style> atau </style>. Kembalikan CSS murni dan ringkasan pe
     });
 
     const data = JSON.parse((response.text ?? '{}').trim());
-    res.json({ ...data, modelUsed: verified.model, quota: verified.quota });
+    res.json({ ...data, modelUsed: verified.geminiModel, quota: verified.quota });
   } catch (err) {
     console.error('AI custom-css error:', err);
     const formatted = getGeminiErrorResponse(err, 'Gagal membuat CSS kustom dengan AI.');
@@ -1392,10 +2330,9 @@ Jangan sertakan tag <style> atau </style>. Kembalikan CSS murni dan ringkasan pe
   }
 });
 
-// 4. AI Sample Blog Content Generator
 app.post('/api/ai/sample-content', async (req, res) => {
   try {
-    const verified = await verifyAndChargeGeminiRequest(req, res);
+    const verified = await resolveAiExecutionRequest(req, res);
     if (!verified) return;
 
     const topic = typeof req.body?.topic === 'string' ? req.body.topic.trim() : '';
@@ -1404,27 +2341,31 @@ app.post('/api/ai/sample-content', async (req, res) => {
       return;
     }
 
+    const userPrompt = `Buat konten pratinjau blog Blogspot realistis dalam Bahasa Indonesia untuk topik "${topic}".
+Kembalikan JSON dengan field:
+- blogTitle, blogDescription, authorName, authorBio
+- navLinks: [{ label, category }] (4 item)
+- labels: [{ name, count }] (5 item)
+- posts: 4 item [{ title, snippet, bodyHtml, category, readTime, date }]`;
+
+    if (verified.engine === 'freellm') {
+      const llmRes = await callFreeLlmJson<Record<string, unknown>>({
+        systemInstruction: 'Anda adalah editor media dan penulis blog profesional berbahasa Indonesia.',
+        userPrompt,
+        requestedModel: verified.freellmModel,
+      });
+      res.json({
+        ...llmRes.data,
+        modelUsed: llmRes.modelUsed,
+        providerUsed: llmRes.providerUsed,
+      });
+      return;
+    }
+
     const ai = getGeminiClient();
-
     const response = await ai.models.generateContent({
-      model: verified.model,
-      contents: `Buat konten pratinjau blog Blogspot yang sangat realistis dalam Bahasa Indonesia untuk topik:
-"${topic}"
-
-Buat:
-- blogTitle: Nama blog yang menarik dan natural
-- blogDescription: Deskripsi singkat 1 kalimat
-- authorName: Nama penulis yang natural
-- authorBio: Bio singkat 1-2 kalimat
-- navLinks: 4 tautan menu navigasi (Beranda + 3 kategori relevan)
-- labels: 5 label/kategori beserta jumlah artikelnya
-- posts: 4 artikel lengkap. Untuk setiap artikel sertakan:
-  - title (judul menarik, tidak klise)
-  - snippet (ringkasan 2 kalimat)
-  - bodyHtml (isi artikel HTML yang kaya: 3 paragraf <p>, 1 subjudul <h3>, dan 1 kutipan <blockquote> agar tampilan halaman artikel dapat diuji secara menyeluruh)
-  - category (1 kata/frasa kategori)
-  - readTime (contoh: "4 mnt baca")
-  - date (contoh: "14 Nov 2026")`,
+      model: verified.geminiModel,
+      contents: userPrompt,
       config: {
         systemInstruction: 'Anda adalah editor media dan penulis blog profesional berbahasa Indonesia.',
         responseMimeType: 'application/json',
@@ -1479,7 +2420,7 @@ Buat:
     });
 
     const data = JSON.parse((response.text ?? '{}').trim());
-    res.json({ ...data, modelUsed: verified.model, quota: verified.quota });
+    res.json({ ...data, modelUsed: verified.geminiModel, quota: verified.quota });
   } catch (err) {
     console.error('AI sample-content error:', err);
     const formatted = getGeminiErrorResponse(err, 'Gagal membuat konten sampel dengan AI.');
@@ -1487,10 +2428,9 @@ Buat:
   }
 });
 
-// 5. AI XML Diagnostics & Auto-Fix
 app.post('/api/ai/diagnose-xml', async (req, res) => {
   try {
-    const verified = await verifyAndChargeGeminiRequest(req, res);
+    const verified = await resolveAiExecutionRequest(req, res);
     if (!verified) return;
 
     const xmlSnippet = typeof req.body?.xmlSnippet === 'string' ? req.body.xmlSnippet.slice(0, 24000) : '';
@@ -1501,25 +2441,31 @@ app.post('/api/ai/diagnose-xml', async (req, res) => {
       return;
     }
 
-    const ai = getGeminiClient();
-
-    const response = await ai.models.generateContent({
-      model: verified.model,
-      contents: `Audit struktur dan kualitas template XML Blogger berikut.
-Statistik terdeteksi:
-- Jumlah Variable: ${stats.variables ?? 0}
-- Jumlah b:section: ${stats.sections ?? 0}
-- Jumlah b:widget: ${stats.widgets ?? 0}
-- Meta viewport responsif: ${stats.hasViewportMeta ? 'Ada' : 'Tidak ada'}
-- Tag b:skin: ${stats.hasSkin ? 'Ada' : 'Tidak ada'}
-
-Cuplikan kode XML (bagian awal & CSS):
+    const userPrompt = `Audit struktur dan kualitas template XML Blogger berikut.
+Statistik: Variables=${stats.variables ?? 0}, b:section=${stats.sections ?? 0}, b:widget=${stats.widgets ?? 0}, Viewport=${stats.hasViewportMeta ? 'Ada' : 'Tidak ada'}, b:skin=${stats.hasSkin ? 'Ada' : 'Tidak ada'}.
+Cuplikan XML:
 ${xmlSnippet}
 
-Berikan:
-1. summary: Ringkasan kondisi template dalam 2 kalimat Bahasa Indonesia.
-2. items: 4-5 temuan konkret (severity: "good" | "warning" | "fixable") mencakup responsivitas perangkat seluler, keterbacaan tipografi, kelengkapan tag Blogger, dan aksesibilitas kontras.
-3. suggestedCssFix: Blok CSS perbaikan responsivitas & keterbacaan yang aman diterapkan ke template ini (tanpa tag <style>).`,
+Kembalikan JSON: { "summary": string, "items": [{ "category": string, "severity": "good"|"warning"|"fixable", "title": string, "detail": string }], "suggestedCssFix": string }`;
+
+    if (verified.engine === 'freellm') {
+      const llmRes = await callFreeLlmJson<Record<string, unknown>>({
+        systemInstruction: 'Anda adalah arsitek template Blogger/Blogspot yang fokus pada performa, responsivitas, dan keterbacaan.',
+        userPrompt,
+        requestedModel: verified.freellmModel,
+      });
+      res.json({
+        ...llmRes.data,
+        modelUsed: llmRes.modelUsed,
+        providerUsed: llmRes.providerUsed,
+      });
+      return;
+    }
+
+    const ai = getGeminiClient();
+    const response = await ai.models.generateContent({
+      model: verified.geminiModel,
+      contents: userPrompt,
       config: {
         systemInstruction: 'Anda adalah arsitek template Blogger/Blogspot yang fokus pada performa, responsivitas, dan keterbacaan.',
         responseMimeType: 'application/json',
@@ -1548,7 +2494,7 @@ Berikan:
     });
 
     const data = JSON.parse((response.text ?? '{}').trim());
-    res.json({ ...data, modelUsed: verified.model, quota: verified.quota });
+    res.json({ ...data, modelUsed: verified.geminiModel, quota: verified.quota });
   } catch (err) {
     console.error('AI diagnose-xml error:', err);
     const formatted = getGeminiErrorResponse(err, 'Gagal menganalisis template XML.');
@@ -1556,10 +2502,9 @@ Berikan:
   }
 });
 
-// 6. AI Forensic Signature & Watermark Detection
 app.post('/api/ai/detect-ai-signature', async (req, res) => {
   try {
-    const verified = await verifyAndChargeGeminiRequest(req, res);
+    const verified = await resolveAiExecutionRequest(req, res);
     if (!verified) return;
 
     const xmlExcerpt =
@@ -1572,29 +2517,31 @@ app.post('/api/ai/detect-ai-signature', async (req, res) => {
       return;
     }
 
-    const ai = getGeminiClient();
-
-    const response = await ai.models.generateContent({
-      model: verified.model,
-      contents: `Anda adalah analis forensik kode template Blogger/Blogspot XML.
-Periksa apakah template XML ini dibuat, dihasilkan, atau ditandatangani oleh AI (ChatGPT/OpenAI, Claude/Anthropic, Gemini/AI Studio, DeepSeek, Copilot, Qwen, Grok, Cursor, Windsurf, v0, Bolt.new, Lovable, atau AI lainnya) berdasarkan:
-- Komentar XML/HTML/CSS/JS, catatan panduan untuk pengguna, atau header pembuat/generator.
-- Tag <meta>, atribut data-*, JSON-LD, kredit footer, nama variabel, atau pola kode generik khas LLM.
-- Petunjuk tersirat atau penulisan ulang tanda tangan AI dalam bahasa apa pun (Indonesia/Inggris/dll).
-
-Ringkasan pemindaian awal deterministik:
-${staticSummary || 'Belum ada ringkasan.'}
-
-Cuplikan Template XML:
+    const userPrompt = `Periksa apakah template XML ini dibuat/ditandatangani oleh AI.
+Ringkasan pemindaian awal: ${staticSummary || 'Belum ada.'}
+Cuplikan XML:
 ${xmlExcerpt}
 
-Berikan hasil JSON terstruktur dengan:
-1. isAiSigned: boolean (true jika kuat dibuat/dibantu/ditandatangani AI).
-2. confidenceScore: angka 0-100.
-3. verdictLabel: label singkat Bahasa Indonesia (mis. "Ditandatangani ChatGPT / AI", "Kemungkinan Dibantu AI", atau "Tidak Terdeteksi Tanda Tangan AI").
-4. detectedTools: array nama alat/model AI yang teridentifikasi (kosong jika tidak ada).
-5. reasoning: penjelasan ringkas 2-3 kalimat dalam Bahasa Indonesia.
-6. extraSignatures: maksimal 6 temuan potongan kode (snippet persis seperti di XML jika ada) yang mencurigakan sebagai tanda tangan atau jejak AI.`,
+Kembalikan JSON: { "isAiSigned": boolean, "confidenceScore": number, "verdictLabel": string, "detectedTools": string[], "reasoning": string, "extraSignatures": [{ "snippet": string, "reason": string, "suspectedTool": string, "zone": string }] }`;
+
+    if (verified.engine === 'freellm') {
+      const llmRes = await callFreeLlmJson<Record<string, unknown>>({
+        systemInstruction: 'Anda adalah analis forensik kode XML Blogger yang objektif.',
+        userPrompt,
+        requestedModel: verified.freellmModel,
+      });
+      res.json({
+        ...llmRes.data,
+        modelUsed: llmRes.modelUsed,
+        providerUsed: llmRes.providerUsed,
+      });
+      return;
+    }
+
+    const ai = getGeminiClient();
+    const response = await ai.models.generateContent({
+      model: verified.geminiModel,
+      contents: userPrompt,
       config: {
         systemInstruction:
           'Anda adalah analis forensik kode XML Blogger yang objektif. Hanya kutip snippet yang benar-benar muncul pada cuplikan XML yang diberikan.',
@@ -1637,7 +2584,7 @@ Berikan hasil JSON terstruktur dengan:
     });
 
     const data = JSON.parse((response.text ?? '{}').trim());
-    res.json({ ...data, modelUsed: verified.model, quota: verified.quota });
+    res.json({ ...data, modelUsed: verified.geminiModel, quota: verified.quota });
   } catch (err) {
     console.error('AI detect-ai-signature error:', err);
     const formatted = getGeminiErrorResponse(err, 'Gagal menjalankan analisis forensik tanda tangan AI.');
@@ -1645,10 +2592,9 @@ Berikan hasil JSON terstruktur dengan:
   }
 });
 
-// 7. Unified Feature Audit for every Workspace Tab (Preview, Layout, SEO, Errors, Editor, Inspector, Console)
 app.post('/api/ai/feature-audit', async (req, res) => {
   try {
-    const verified = await verifyAndChargeGeminiRequest(req, res);
+    const verified = await resolveAiExecutionRequest(req, res);
     if (!verified) return;
 
     const page = typeof req.body?.page === 'string' ? req.body.page.slice(0, 32) : 'preview';
@@ -1660,14 +2606,39 @@ app.post('/api/ai/feature-audit', async (req, res) => {
       return;
     }
 
+    const userPrompt = `Anda adalah asisten pakar TemaLoka untuk tab "${page}".
+Berikan ringkasan audit singkat, 3-4 poin temuan & saran perbaikan konkret Bahasa Indonesia, dan opsional CSS perbaikan responsif.
+Konteks Template:
+${contextSummary}
+Kembalikan JSON: { "summary": string, "highlights": string[], "suggestedCss": string }`;
+
+    if (verified.engine === 'freellm') {
+      const llmRes = await callFreeLlmJson<{
+        summary?: string;
+        highlights?: string[];
+        suggestedCss?: string;
+      }>({
+        systemInstruction: 'Anda adalah konsultan teknis template Blogger XML (Blogspot).',
+        userPrompt,
+        requestedModel: verified.freellmModel,
+      });
+      res.json({
+        page,
+        engineLabel: `${llmRes.providerUsed} (${llmRes.modelUsed})`,
+        summary: llmRes.data.summary || 'Analisis FreeLLMAPI selesai.',
+        highlights: Array.isArray(llmRes.data.highlights) ? llmRes.data.highlights : [],
+        suggestedCss:
+          typeof llmRes.data.suggestedCss === 'string' && llmRes.data.suggestedCss.trim()
+            ? llmRes.data.suggestedCss.trim()
+            : undefined,
+      });
+      return;
+    }
+
     const ai = getGeminiClient();
     const response = await ai.models.generateContent({
-      model: verified.model,
-      contents: `Anda adalah asisten pakar TemaLoka untuk tab "${page}".
-Berdasarkan konteks template XML Blogger aktif berikut, berikan ringkasan audit singkat, 3-4 poin temuan & saran perbaikan konkret dalam Bahasa Indonesia, dan opsional CSS perbaikan responsif (jika relevan dengan tab preview/layout/seo).
-
-Konteks Template:
-${contextSummary}`,
+      model: verified.geminiModel,
+      contents: userPrompt,
       config: {
         systemInstruction:
           'Anda adalah konsultan teknis template Blogger XML (Blogspot). Jawab ringkas, akurat, dalam JSON valid.',
@@ -1690,7 +2661,7 @@ ${contextSummary}`,
     const data = JSON.parse((response.text ?? '{}').trim());
     res.json({
       page,
-      engineLabel: `Gemini (${verified.model})`,
+      engineLabel: `Gemini (${verified.geminiModel})`,
       summary: data.summary || 'Analisis Gemini selesai.',
       highlights: Array.isArray(data.highlights) ? data.highlights : [],
       suggestedCss: typeof data.suggestedCss === 'string' && data.suggestedCss.trim() ? data.suggestedCss.trim() : undefined,
@@ -1698,15 +2669,14 @@ ${contextSummary}`,
     });
   } catch (err) {
     console.error('AI feature-audit error:', err);
-    const formatted = getGeminiErrorResponse(err, 'Gagal menjalankan audit fitur dengan Gemini.');
+    const formatted = getGeminiErrorResponse(err, 'Gagal menjalankan audit fitur dengan AI.');
     res.status(formatted.status).json({ error: formatted.message });
   }
 });
 
-// 8. Unified Multi-Turn AI Chat connected to active XML Template & Workspace
 app.post('/api/ai/chat', async (req, res) => {
   try {
-    const verified = await verifyAndChargeGeminiRequest(req, res);
+    const verified = await resolveAiExecutionRequest(req, res);
     if (!verified) return;
 
     const message = typeof req.body?.message === 'string' ? req.body.message.trim().slice(0, 8000) : '';
@@ -1721,7 +2691,6 @@ app.post('/api/ai/chat', async (req, res) => {
       return;
     }
 
-    // Build full untruncated attached XML splitter parts (up to ~1.5M chars safely within Gemini 1M-token window)
     const MAX_ATTACHED_TOTAL_CHARS = 1_500_000;
     let totalAttachedChars = 0;
     const attachedBlocks: string[] = [];
@@ -1738,7 +2707,7 @@ app.post('/api/ai/chat', async (req, res) => {
       if (!part || typeof part.content !== 'string' || !part.content) continue;
       if (totalAttachedChars + part.content.length > MAX_ATTACHED_TOTAL_CHARS) {
         res.status(413).json({
-          error: `Total lampiran bagian XML melebihi batas sekali kirim (~1.5 MB teks). Pilih sebagian bagian XML di XML Splitter lalu kirim bertahap agar tidak ada kode yang terpotong.`,
+          error: 'Total lampiran bagian XML melebihi batas sekali kirim (~1.5 MB teks). Pilih sebagian bagian XML lalu kirim bertahap.',
         });
         return;
       }
@@ -1755,6 +2724,42 @@ app.post('/api/ai/chat', async (req, res) => {
       );
     }
 
+    const attachedSection =
+      attachedBlocks.length > 0
+        ? `\n\n=== LAMPIRAN BAGIAN XML UTUH (${attachedBlocks.length} BAGIAN) ===\n${attachedBlocks.join('\n\n')}\n=== AKHIR LAMPIRAN ===`
+        : '';
+
+    const systemInstruction =
+      'Anda adalah Asisten AI resmi di dalam studio TemaLoka (editor & inspector template XML Blogspot/Blogger). ' +
+      'Jawab dalam Bahasa Indonesia yang jelas, terstruktur, dan langsung merujuk ke detail template XML aktif (nama section, widget, variable, CSS, JS, parameter URL, SEO/AdSense, atau error XML) bila tersedia. ' +
+      'Jika pengguna meminta perbaikan CSS atau gaya tampilan, sertakan kode CSS bersih di dalam blok ```css ... ``` (tanpa tag <style>) agar bisa diterapkan dengan satu klik.';
+
+    if (verified.engine === 'freellm') {
+      const llmHistory = rawHistory
+        .slice(-8)
+        .map((item: { role?: string; content?: string }) => ({
+          role: (item?.role === 'assistant' ? 'assistant' : 'user') as 'user' | 'assistant',
+          content: typeof item?.content === 'string' ? item.content.slice(0, 2000) : '',
+        }))
+        .filter((h: { content: string }) => Boolean(h.content));
+
+      const llmRes = await callFreeLlmChat({
+        systemInstruction,
+        history: llmHistory,
+        requestedModel: verified.freellmModel,
+        userPrompt: `Tab aktif: ${activePage}\nKonteks template XML:\n${templateContext.slice(0, 18000)}${attachedSection.slice(0, 32000)}\n\nPertanyaan Pengguna:\n${message}`,
+      });
+
+      const cssMatch = /```css\s*([\s\S]*?)```/i.exec(llmRes.text);
+      res.json({
+        reply: llmRes.text,
+        suggestedCss: cssMatch?.[1]?.trim() || undefined,
+        engineLabel: `${llmRes.providerUsed} (${llmRes.modelUsed})`,
+        modelId: llmRes.modelUsed,
+      });
+      return;
+    }
+
     const historyLines = rawHistory
       .slice(-10)
       .map((item: { role?: string; content?: string }) => {
@@ -1765,14 +2770,9 @@ app.post('/api/ai/chat', async (req, res) => {
       .filter(Boolean)
       .join('\n\n');
 
-    const attachedSection =
-      attachedBlocks.length > 0
-        ? `\n\n=== LAMPIRAN BAGIAN XML UTUH DARI XML SPLITTER (${attachedBlocks.length} BAGIAN, TIDAK TERPOTONG) ===\n${attachedBlocks.join('\n\n')}\n=== AKHIR LAMPIRAN XML UTUH ===`
-        : '';
-
     const ai = getGeminiClient();
     const response = await ai.models.generateContent({
-      model: verified.model,
+      model: verified.geminiModel,
       contents: `Tab aktif pengguna saat ini: ${activePage}
 
 Ringkasan & konteks template XML Blogger yang sedang dibuka:
@@ -1781,11 +2781,7 @@ ${templateContext || '(Belum ada konteks XML khusus)'}${attachedSection}
 ${historyLines ? `Riwayat percakapan sebelumnya:\n${historyLines}\n\n` : ''}Pertanyaan / Perintah Terbaru Pengguna:
 ${message}`,
       config: {
-        systemInstruction:
-          'Anda adalah Asisten AI resmi di dalam studio TemaLoka (editor & inspector template XML Blogspot/Blogger). ' +
-          'Jawab dalam Bahasa Indonesia yang jelas, terstruktur, dan langsung merujuk ke detail template XML aktif (nama section, widget, variable, CSS, JS, parameter URL, SEO/AdSense, atau error XML) bila tersedia. ' +
-          'Jika pengguna melampirkan BAGIAN XML UTUH dari XML Splitter, baca seluruh isi bagian tersebut secara lengkap dari awal sampai akhir tanpa mengabaikan baris akhir maupun CDATA. ' +
-          'Jika pengguna meminta perbaikan CSS atau gaya tampilan, sertakan kode CSS bersih di dalam blok ```css ... ``` (tanpa tag <style>) agar pengguna bisa menerapkannya dengan satu klik.',
+        systemInstruction,
       },
     });
 
@@ -1796,8 +2792,8 @@ ${message}`,
     res.json({
       reply,
       suggestedCss,
-      engineLabel: `Gemini (${verified.model})`,
-      modelId: verified.model,
+      engineLabel: `Gemini (${verified.geminiModel})`,
+      modelId: verified.geminiModel,
       quota: verified.quota,
     });
   } catch (err) {
@@ -1807,13 +2803,15 @@ ${message}`,
   }
 });
 
+// ==================== DYNAMIC ADS.TXT, ROBOTS.TXT & SITEMAP.XML (FROM D1) ====================
+
 interface AdsTxtCacheEntry {
   content: string;
   expiresAt: number;
 }
 
 let adsTxtCache: AdsTxtCacheEntry | null = null;
-const ADS_TXT_CACHE_TTL_MS = 15_000;
+const ADS_TXT_CACHE_TTL_MS = 10_000;
 
 function extractPubDigitsFromPublisherId(raw: string): string {
   const digits = raw.replace(/\D+/g, '');
@@ -1828,48 +2826,15 @@ async function resolveDynamicAdsTxt(): Promise<string> {
     return adsTxtCache.content;
   }
 
-  const fallbackDisabled = '# ads.txt belum dikonfigurasi di Panel Admin AdSense (/?admin).\n';
-  const { projectId, firestoreDatabaseId, apiKey } = FIREBASE_APPLET_CONFIG;
-  if (!projectId || !apiKey) {
-    return fallbackDisabled;
-  }
-
+  const fallbackDisabled = '# ads.txt belum dikonfigurasi di Panel Admin (/?admin).\n';
   try {
-    const endpoint =
-      `https://firestore.googleapis.com/v1/projects/${encodeURIComponent(projectId)}` +
-      `/databases/${encodeURIComponent(firestoreDatabaseId)}` +
-      `/documents/appConfig/adsense?key=${encodeURIComponent(apiKey)}`;
-
-    const response = await fetch(endpoint, {
-      method: 'GET',
-      headers: { Accept: 'application/json' },
-      signal: AbortSignal.timeout(3000),
-    });
-
-    if (!response.ok) {
-      return fallbackDisabled;
-    }
-
-    const docData = (await response.json()) as {
-      fields?: {
-        adsenseEnabled?: { booleanValue?: boolean };
-        adsTxtContent?: { stringValue?: string };
-        publisherId?: { stringValue?: string };
-      };
-    };
-
-    const fields = docData?.fields;
-    if (!fields) {
-      return fallbackDisabled;
-    }
-
-    const enabled = fields.adsenseEnabled?.booleanValue === true;
-    const rawAdsTxt = (fields.adsTxtContent?.stringValue ?? '').replace(/\r\n?/g, '\n').trim();
-    const rawPubId = (fields.publisherId?.stringValue ?? '').trim();
+    const cfg = await getSiteAdsenseConfig();
+    const rawAdsTxt = (cfg.adsTxtContent || '').replace(/\r\n?/g, '\n').trim();
+    const rawPubId = (cfg.publisherId || '').trim();
 
     let resolved = fallbackDisabled;
-    if (!enabled) {
-      resolved = '# AdSense saat ini dinonaktifkan oleh admin di Pengaturan AdSense (/?admin).\n';
+    if (!cfg.adsenseEnabled) {
+      resolved = '# AdSense saat ini dinonaktifkan oleh admin di Pengaturan Admin (/?admin).\n';
     } else if (rawAdsTxt) {
       resolved = `${rawAdsTxt}\n`;
     } else {
@@ -1893,6 +2858,52 @@ app.get('/ads.txt', async (_req, res) => {
   const content = await resolveDynamicAdsTxt();
   res.setHeader('Cache-Control', 'public, max-age=15');
   res.type('text/plain; charset=utf-8').send(content);
+});
+
+app.get('/robots.txt', async (req, res) => {
+  try {
+    const seo = await getSiteSeoConfig();
+    const origin =
+      seo.canonicalOrigin ||
+      `${req.protocol}://${req.get('host') || 'localhost:3000'}`;
+    let txt = (seo.robotsTxtContent || 'User-agent: *\nAllow: /\n').trim();
+    if (seo.sitemapEnabled && !/sitemap:/i.test(txt)) {
+      txt = `${txt}\nSitemap: ${origin.replace(/\/+$/, '')}/sitemap.xml\n`;
+    } else {
+      txt = `${txt}\n`;
+    }
+    res.setHeader('Cache-Control', 'public, max-age=30');
+    res.type('text/plain; charset=utf-8').send(txt);
+  } catch {
+    res.type('text/plain; charset=utf-8').send('User-agent: *\nAllow: /\n');
+  }
+});
+
+app.get('/sitemap.xml', async (req, res) => {
+  try {
+    const seo = await getSiteSeoConfig();
+    if (!seo.sitemapEnabled) {
+      res.status(404).type('text/plain').send('Sitemap dinonaktifkan oleh admin.');
+      return;
+    }
+    const origin = (
+      seo.canonicalOrigin || `${req.protocol}://${req.get('host') || 'localhost:3000'}`
+    ).replace(/\/+$/, '');
+    const lastmod = new Date().toISOString().slice(0, 10);
+    const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+  <url>
+    <loc>${escapeXmlEntity(origin)}/</loc>
+    <lastmod>${lastmod}</lastmod>
+    <changefreq>weekly</changefreq>
+    <priority>1.0</priority>
+  </url>
+</urlset>\n`;
+    res.setHeader('Cache-Control', 'public, max-age=60');
+    res.type('application/xml; charset=utf-8').send(xml);
+  } catch {
+    res.status(500).type('text/plain').send('Gagal menghasilkan sitemap.xml.');
+  }
 });
 
 async function startServer() {
@@ -1953,7 +2964,7 @@ async function startServer() {
   }
 
   httpServer.listen(PORT, '0.0.0.0', () => {
-    console.log(`TemaLoka server running at http://0.0.0.0:${PORT}`);
+    console.log(`TemaLoka server running at http://0.0.0.0:${PORT} [DB=${getActiveDbMode()}]`);
   });
 }
 

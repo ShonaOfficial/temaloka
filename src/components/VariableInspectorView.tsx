@@ -217,7 +217,9 @@ export const VariableInspectorView: React.FC<VariableInspectorViewProps> = ({
     user,
     engineMode,
     geminiModel,
-    signInWithGoogle,
+    freellmModel,
+    freellmStatus,
+    openAuthModal,
     authorizedGeminiFetch,
   } = useAuthAndAi();
 
@@ -981,15 +983,21 @@ ${excerpt}`
         setAiSigError(
           isOfflineMode
             ? 'Mode Offline aktif tanpa server LLM Lokal terhubung. Pemindaian forensik deterministik tetap aktif 100% offline di atas.'
-            : 'Mode AI Lokal aktif tanpa Ollama/LM Studio terhubung. Pilih Gemini Cloud di pemilih Mesin AI atau hubungkan server LLM lokal untuk analisis mendalam.'
+            : 'Mode AI Lokal aktif tanpa Ollama/LM Studio terhubung. Pilih FreeLLMAPI atau Gemini Cloud di pemilih Mesin AI atau hubungkan server LLM lokal untuk analisis mendalam.'
         );
         return;
       }
 
-      if (!user) {
-        onNotify?.('Login Google diperlukan untuk memakai Gemini Cloud.', 'info');
-        const ok = await signInWithGoogle();
-        if (!ok) return;
+      if (engineMode === 'gemini' && !user) {
+        onNotify?.('Silakan masuk akun untuk memakai Gemini Cloud.', 'info');
+        openAuthModal();
+        return;
+      }
+
+      if (engineMode === 'freellm' && !freellmStatus.allowForGuests && !user) {
+        onNotify?.('Masuk akun diperlukan untuk memakai FreeLLMAPI.', 'info');
+        openAuthModal();
+        return;
       }
 
       const data = await authorizedGeminiFetch<DeepAiSignatureAnalysisResult>(
@@ -997,7 +1005,9 @@ ${excerpt}`
         { xmlExcerpt: excerpt, staticSummary }
       );
       setDeepAiSigResult(data);
-      onNotify?.(`Analisis mendalam AI (${geminiModel}) selesai.`, 'success');
+      const label =
+        engineMode === 'freellm' ? `FreeLLMAPI (${freellmModel})` : geminiModel;
+      onNotify?.(`Analisis mendalam AI (${label}) selesai.`, 'success');
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Gagal menjalankan analisis mendalam AI.';
       setAiSigError(msg);

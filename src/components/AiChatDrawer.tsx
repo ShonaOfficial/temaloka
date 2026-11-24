@@ -14,7 +14,7 @@ import {
   X,
 } from 'lucide-react';
 import { useAuthAndAi } from '../contexts/AuthAndAiContext';
-import { getGeminiModelOption } from '../lib/aiEngineCatalog';
+import { getFreeLlmModelOption, getGeminiModelOption } from '../lib/aiEngineCatalog';
 import type { OfflineAiController } from '../hooks/useOfflineAiRuntime';
 import { runChatPromptOnLocalAi, type WorkspaceAiPage } from '../lib/offlineAiRuntime';
 import type { ParsedTemplateInfo } from '../types/blogger';
@@ -149,10 +149,12 @@ export const AiChatDrawer: React.FC<AiChatDrawerProps> = ({
   const {
     user,
     isSigningIn,
-    signInWithGoogle,
+    openAuthModal,
     engineMode,
     setEngineMode,
     geminiModel,
+    freellmModel,
+    freellmStatus,
     quota,
     chatMessages,
     attachedXmlParts,
@@ -171,6 +173,10 @@ export const AiChatDrawer: React.FC<AiChatDrawerProps> = ({
 
   const effectiveMode = isOfflineMode ? 'local' : engineMode;
   const activeGeminiMeta = getGeminiModelOption(geminiModel);
+  const activeFreeLlmMeta = getFreeLlmModelOption(freellmModel);
+  const needsLoginForActiveEngine =
+    (effectiveMode === 'gemini' && !user) ||
+    (effectiveMode === 'freellm' && !freellmStatus.allowForGuests && !user);
 
   const attachedTotalBytes = useMemo(
     () => attachedXmlParts.reduce((acc, p) => acc + p.byteSize, 0),
@@ -234,7 +240,13 @@ export const AiChatDrawer: React.FC<AiChatDrawerProps> = ({
     if (!trimmed || isSending) return;
 
     if (effectiveMode === 'gemini' && !user) {
-      onNotify('Silakan Login Google terlebih dahulu untuk chat dengan Gemini Cloud.', 'info');
+      onNotify('Silakan masuk akun terlebih dahulu untuk chat dengan Gemini Cloud.', 'info');
+      openAuthModal();
+      return;
+    }
+    if (effectiveMode === 'freellm' && !freellmStatus.allowForGuests && !user) {
+      onNotify('Silakan masuk akun terlebih dahulu untuk memakai FreeLLMAPI.', 'info');
+      openAuthModal();
       return;
     }
 
@@ -253,7 +265,14 @@ export const AiChatDrawer: React.FC<AiChatDrawerProps> = ({
           : '';
       const storedUserMessage = `${attachedTag}${trimmed}`.slice(0, 12000);
 
-      if (effectiveMode === 'gemini') {
+      if (effectiveMode === 'gemini' || effectiveMode === 'freellm') {
+        const defaultEngineLabel =
+          effectiveMode === 'freellm'
+            ? `FreeLLMAPI · ${activeFreeLlmMeta.shortLabel}`
+            : activeGeminiMeta.label;
+        const defaultModelId =
+          effectiveMode === 'freellm' ? freellmModel : geminiModel;
+
         const res = await authorizedGeminiFetch<{
           reply: string;
           suggestedCss?: string;
@@ -279,15 +298,15 @@ export const AiChatDrawer: React.FC<AiChatDrawerProps> = ({
           {
             role: 'user',
             content: storedUserMessage,
-            engineLabel: res.engineLabel || activeGeminiMeta.label,
-            modelId: res.modelId || geminiModel,
+            engineLabel: res.engineLabel || defaultEngineLabel,
+            modelId: res.modelId || defaultModelId,
             pageContext: activePage,
           },
           {
             role: 'assistant',
             content: res.reply,
-            engineLabel: res.engineLabel || activeGeminiMeta.label,
-            modelId: res.modelId || geminiModel,
+            engineLabel: res.engineLabel || defaultEngineLabel,
+            modelId: res.modelId || defaultModelId,
             suggestedCss: res.suggestedCss,
             pageContext: activePage,
           }
@@ -365,9 +384,11 @@ export const AiChatDrawer: React.FC<AiChatDrawerProps> = ({
                   Chat AI TemaLoka
                 </h2>
                 <div className="text-[11px] text-slate-600 truncate font-medium">
-                  {effectiveMode === 'gemini'
-                    ? `${activeGeminiMeta.shortLabel}`
-                    : `${offlineAi.activeMeta.shortName}`}
+                  {effectiveMode === 'freellm'
+                    ? `FreeLLM · ${activeFreeLlmMeta.shortLabel}`
+                    : effectiveMode === 'gemini'
+                      ? `${activeGeminiMeta.shortLabel}`
+                      : `${offlineAi.activeMeta.shortName}`}
                 </div>
               </div>
             </div>
@@ -376,7 +397,7 @@ export const AiChatDrawer: React.FC<AiChatDrawerProps> = ({
               <button
                 type="button"
                 onClick={() => setShowEnginePicker((v) => !v)}
-                title="Pilih Mesin AI (Gemini atau AI Lokal)"
+                title="Pilih Mesin AI (AI Lokal, FreeLLMAPI, atau Gemini)"
                 className={`flex items-center gap-1 px-2.5 py-2 sm:py-1.5 min-h-[38px] sm:min-h-[32px] rounded-lg border text-[11px] font-semibold cursor-pointer ${
                   showEnginePicker
                     ? 'bg-slate-900 text-white border-slate-900'
@@ -410,7 +431,11 @@ export const AiChatDrawer: React.FC<AiChatDrawerProps> = ({
           {/* Dedicated Always-Visible Quota / Limit & Active Tab Status Bar */}
           <div className="flex flex-wrap items-center justify-between gap-2 px-2.5 py-1.5 rounded-lg bg-white border border-slate-200 text-[11px]">
             <div className="flex items-center gap-1.5 min-w-0">
-              {effectiveMode === 'gemini' ? (
+              {effectiveMode === 'freellm' ? (
+                <span className="font-mono font-semibold text-emerald-700 tabular-nums">
+                  FreeLLMAPI · Tanpa Kuota Gemini
+                </span>
+              ) : effectiveMode === 'gemini' ? (
                 <span className="font-mono font-semibold text-blue-700 tabular-nums">
                   Limit Gemini: Sisa {quota.remaining}/{quota.dailyLimit}
                 </span>
@@ -500,24 +525,27 @@ export const AiChatDrawer: React.FC<AiChatDrawerProps> = ({
 
         {/* Message List */}
         <div className="flex-1 min-h-0 overflow-y-auto p-3.5 space-y-3 bg-white">
-          {effectiveMode === 'gemini' && !user && (
+          {needsLoginForActiveEngine && (
             <div className="p-3 rounded-xl border border-amber-200 bg-amber-50 space-y-2">
               <div className="flex items-center gap-2 text-xs font-bold text-amber-950">
                 <Sparkles className="w-4 h-4 text-amber-700 shrink-0" />
-                <span>Masuk Google untuk Memakai Gemini</span>
+                <span>
+                  Masuk Akun untuk Memakai{' '}
+                  {effectiveMode === 'freellm' ? 'FreeLLMAPI' : 'Gemini Cloud'}
+                </span>
               </div>
               <p className="text-[11px] text-amber-900 leading-relaxed">
-                Login Google menjaga riwayat chat &amp; kuota harian ({quota.dailyLimit}/hari) akun Anda. Atau beralih ke AI Lokal agar gratis tanpa login.
+                Masuk atau daftar akun TemaLoka untuk menyinkronkan riwayat chat &amp; kuota harian ({quota.dailyLimit}/hari). Atau beralih ke AI Lokal agar gratis 100% tanpa login.
               </p>
               <div className="flex flex-wrap gap-2">
                 <button
                   type="button"
-                  onClick={() => void signInWithGoogle()}
+                  onClick={() => openAuthModal()}
                   disabled={isSigningIn}
                   className="flex items-center gap-1.5 px-3 py-2 min-h-[38px] bg-slate-900 hover:bg-slate-800 text-white text-[11px] font-semibold rounded-lg cursor-pointer"
                 >
                   <LogIn className="w-3.5 h-3.5" />
-                  <span>{isSigningIn ? 'Menghubungkan...' : 'Masuk Google'}</span>
+                  <span>{isSigningIn ? 'Menghubungkan...' : 'Masuk / Daftar Akun'}</span>
                 </button>
                 <button
                   type="button"
@@ -620,9 +648,11 @@ export const AiChatDrawer: React.FC<AiChatDrawerProps> = ({
               <div className="px-3 py-2.5 rounded-xl bg-slate-50 border border-slate-200 text-xs text-slate-600 flex items-center gap-2">
                 <Loader2 className="w-3.5 h-3.5 animate-spin text-blue-600" />
                 <span>
-                  {effectiveMode === 'gemini'
-                    ? `${activeGeminiMeta.shortLabel} sedang menganalisis XML...`
-                    : `${offlineAi.activeMeta.shortName} sedang memproses...`}
+                  {effectiveMode === 'freellm'
+                    ? `${activeFreeLlmMeta.shortLabel} (FreeLLMAPI) sedang menganalisis XML...`
+                    : effectiveMode === 'gemini'
+                      ? `${activeGeminiMeta.shortLabel} sedang menganalisis XML...`
+                      : `${offlineAi.activeMeta.shortName} sedang memproses...`}
                 </span>
               </div>
             </div>
@@ -650,9 +680,11 @@ export const AiChatDrawer: React.FC<AiChatDrawerProps> = ({
                 }
               }}
               placeholder={
-                effectiveMode === 'gemini'
-                  ? `Tanya ${activeGeminiMeta.shortLabel} tentang XML ini...`
-                  : `Tanya ${offlineAi.activeMeta.shortName} (0 kuota)...`
+                effectiveMode === 'freellm'
+                  ? `Tanya FreeLLMAPI (${activeFreeLlmMeta.shortLabel}) tentang XML ini...`
+                  : effectiveMode === 'gemini'
+                    ? `Tanya ${activeGeminiMeta.shortLabel} tentang XML ini...`
+                    : `Tanya ${offlineAi.activeMeta.shortName} (0 kuota)...`
               }
               className="flex-1 min-h-[44px] px-3 py-2 text-sm sm:text-xs bg-white border border-slate-200 rounded-xl text-slate-900 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-600/20 focus:border-blue-600 resize-none"
             />

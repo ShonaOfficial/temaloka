@@ -11,6 +11,7 @@ import {
   Settings2,
   Sparkles,
   X,
+  Zap,
 } from 'lucide-react';
 import type { ParsedTemplateInfo } from '../types/blogger';
 import type { OfflineAiController } from '../hooks/useOfflineAiRuntime';
@@ -23,7 +24,7 @@ import {
 } from '../lib/offlineAiRuntime';
 import type { BloggerErrorDiagnosis, SeoMonetizationReport } from '../lib/seoAndErrorAnalyzer';
 import { useAuthAndAi } from '../contexts/AuthAndAiContext';
-import { getGeminiModelOption } from '../lib/aiEngineCatalog';
+import { getFreeLlmModelOption, getGeminiModelOption } from '../lib/aiEngineCatalog';
 import { AiEngineSelectorCard } from './AiEngineSelectorCard';
 import { useAppOfflineMode } from '../hooks/usePWA';
 
@@ -72,15 +73,20 @@ export const OfflineAiRuntimeBar: React.FC<OfflineAiRuntimeBarProps> = ({
     user,
     engineMode,
     geminiModel,
+    freellmModel,
+    freellmStatus,
     quota,
-    signInWithGoogle,
+    openAuthModal,
     authorizedGeminiFetch,
     setChatOpen,
     onNotify,
   } = useAuthAndAi();
 
+  const useServerAi = !isOfflineMode && (engineMode === 'gemini' || engineMode === 'freellm');
+  const useFreeLlm = !isOfflineMode && engineMode === 'freellm';
   const useGeminiCloud = !isOfflineMode && engineMode === 'gemini';
   const activeGeminiMeta = getGeminiModelOption(geminiModel);
+  const activeFreeLlmMeta = getFreeLlmModelOption(freellmModel);
 
   // Keep instant zero-latency local baseline synced cleanly when key metrics change
   useEffect(() => {
@@ -103,15 +109,20 @@ export const OfflineAiRuntimeBar: React.FC<OfflineAiRuntimeBarProps> = ({
 
   const handleRunDeepAudit = async () => {
     if (useGeminiCloud && !user) {
-      onNotify?.('Silakan Login Google terlebih dahulu untuk memakai Gemini Cloud.', 'info');
-      const ok = await signInWithGoogle();
-      if (!ok) return;
+      onNotify?.('Silakan masuk akun terlebih dahulu untuk memakai Gemini Cloud.', 'info');
+      openAuthModal();
+      return;
+    }
+    if (useFreeLlm && !freellmStatus.allowForGuests && !user) {
+      onNotify?.('Masuk akun diperlukan untuk memakai FreeLLMAPI sesuai kebijakan admin.', 'info');
+      openAuthModal();
+      return;
     }
 
     setIsAnalyzing(true);
     setExpanded(true);
     try {
-      if (useGeminiCloud) {
+      if (useServerAi) {
         const contextSummary = [
           `Template: ${parsedInfo.templateTitle} (${(parsedInfo.xmlByteSize / 1024).toFixed(1)} KB, ${parsedInfo.byteBreakdown.lineCount} baris)`,
           `Sections: ${parsedInfo.sections.length}, Widgets: ${parsedInfo.widgets.length}, Variables: ${parsedInfo.variables.length}`,
@@ -170,15 +181,19 @@ export const OfflineAiRuntimeBar: React.FC<OfflineAiRuntimeBarProps> = ({
     return (
       <div className="bg-slate-50 border-b border-slate-200 px-3 sm:px-5 py-1 flex items-center justify-between gap-2 text-[11px]">
         <div className="flex items-center gap-2 min-w-0">
-          {useGeminiCloud ? (
+          {useFreeLlm ? (
+            <Zap className="w-3 h-3 text-emerald-600 shrink-0" />
+          ) : useGeminiCloud ? (
             <Sparkles className="w-3 h-3 text-blue-600 shrink-0" />
           ) : (
             <Cpu className="w-3 h-3 text-slate-600 shrink-0" />
           )}
           <span className="font-semibold text-slate-700 truncate">
-            {useGeminiCloud
-              ? `Gemini (${activeGeminiMeta.shortLabel}) · Sisa ${quota.remaining}/${quota.dailyLimit}`
-              : `AI Lokal · 0 Kuota`}
+            {useFreeLlm
+              ? `FreeLLMAPI (${activeFreeLlmMeta.shortLabel})`
+              : useGeminiCloud
+                ? `Gemini (${activeGeminiMeta.shortLabel}) · Sisa ${quota.remaining}/${quota.dailyLimit}`
+                : `AI Lokal · 0 Kuota`}
           </span>
         </div>
         <button
@@ -198,15 +213,19 @@ export const OfflineAiRuntimeBar: React.FC<OfflineAiRuntimeBarProps> = ({
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
         <div className="flex items-center justify-between sm:justify-start gap-2 min-w-0">
           <div className="flex items-center gap-2 min-w-0">
-            {useGeminiCloud ? (
+            {useFreeLlm ? (
+              <Zap className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+            ) : useGeminiCloud ? (
               <Sparkles className="w-3.5 h-3.5 text-blue-600 shrink-0" />
             ) : (
               <Cpu className="w-3.5 h-3.5 text-slate-700 shrink-0" />
             )}
             <span className="text-xs font-semibold text-slate-900 truncate">
-              {useGeminiCloud
-                ? `Gemini · ${activeGeminiMeta.shortLabel}`
-                : `AI Lokal · ${controller.activeMeta.shortName}`}
+              {useFreeLlm
+                ? `FreeLLM · ${activeFreeLlmMeta.shortLabel}`
+                : useGeminiCloud
+                  ? `Gemini · ${activeGeminiMeta.shortLabel}`
+                  : `AI Lokal · ${controller.activeMeta.shortName}`}
             </span>
           </div>
 
@@ -216,22 +235,26 @@ export const OfflineAiRuntimeBar: React.FC<OfflineAiRuntimeBarProps> = ({
             onClick={controller.openSettings}
             className="sm:hidden px-2 py-0.5 rounded-md border border-slate-200 bg-white text-[10px] font-mono font-semibold text-slate-700 tabular-nums shrink-0 cursor-pointer"
           >
-            {useGeminiCloud
-              ? user
-                ? `Sisa ${quota.remaining}/${quota.dailyLimit}`
-                : `Limit ${quota.dailyLimit}/hr`
-              : '0 Kuota'}
+            {useFreeLlm
+              ? 'FreeLLMAPI'
+              : useGeminiCloud
+                ? user
+                  ? `Sisa ${quota.remaining}/${quota.dailyLimit}`
+                  : `Limit ${quota.dailyLimit}/hr`
+                : '0 Kuota'}
           </button>
 
           <span className="text-xs text-slate-500 hidden sm:inline truncate">
             {PAGE_LABELS[page]}
-            {useGeminiCloud
-              ? user
-                ? ` · Sisa Kuota ${quota.remaining}/${quota.dailyLimit}`
-                : ' · Perlu Login Google'
-              : controller.probeResult
-                ? ` · ${controller.probeResult.statusLabel}`
-                : ' · 0 Kuota Server'}
+            {useFreeLlm
+              ? ' · Internal FreeLLMAPI (0 Kuota Gemini)'
+              : useGeminiCloud
+                ? user
+                  ? ` · Sisa Kuota ${quota.remaining}/${quota.dailyLimit}`
+                  : ' · Perlu Masuk Akun'
+                : controller.probeResult
+                  ? ` · ${controller.probeResult.statusLabel}`
+                  : ' · 0 Kuota Server'}
           </span>
         </div>
 
@@ -273,7 +296,7 @@ export const OfflineAiRuntimeBar: React.FC<OfflineAiRuntimeBarProps> = ({
           <button
             type="button"
             onClick={controller.openSettings}
-            title="Pilih Mesin AI (Google Gemini atau AI Lokal Perangkat)"
+            title="Pilih Mesin AI (AI Lokal, FreeLLMAPI, atau Gemini)"
             className="flex items-center gap-1 px-2.5 py-1.5 min-h-[34px] text-[11px] font-medium text-slate-700 bg-white hover:bg-slate-100 border border-slate-200 rounded-lg whitespace-nowrap shrink-0 cursor-pointer"
           >
             <Settings2 className="w-3.5 h-3.5" />
@@ -368,10 +391,10 @@ export const OfflineAiRuntimeModal: React.FC<OfflineAiRuntimeModalProps> = ({
         <div className="px-4 sm:px-5 py-3.5 border-b border-slate-200 flex items-center justify-between gap-3">
           <div>
             <h3 className="text-sm font-semibold text-slate-900">
-              Pemilih Mesin AI Hybrid (Gemini Cloud &amp; AI Lokal)
+              Pemilih Mesin AI Hybrid (AI Lokal, FreeLLMAPI &amp; Gemini)
             </h3>
             <p className="text-[11px] text-slate-500 mt-0.5">
-              Pilih Google Gemini (Login Google) atau runtime AI Lokal di perangkat Anda untuk semua fitur TemaLoka.
+              Pilih AI Lokal 0 kuota, mesin internal FreeLLMAPI, atau Google Gemini untuk semua fitur TemaLoka.
             </p>
           </div>
           <button

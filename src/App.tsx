@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   Bot,
   Code2,
+  Crown,
   Download,
   Eye,
   LayoutGrid,
@@ -87,6 +88,13 @@ import { useCloudNotepad } from './hooks/useCloudNotepad';
 import { useSiteAdsense } from './hooks/useSiteAdsense';
 import { AdminAdsensePanel } from './components/AdminAdsensePanel';
 import { AdsenseSlotRenderer } from './components/AdsenseSlotRenderer';
+import { ProFeatureGate } from './components/ProFeatureGate';
+import { ProUpgradePaymentModal } from './components/ProUpgradePaymentModal';
+import {
+  getFeatureAccessStatus,
+  hasFreeAdsPrivilege,
+  resolveUserProPlan,
+} from './lib/featureRegistry';
 
 type WorkspaceView =
   | 'preview'
@@ -177,6 +185,17 @@ const WORKSPACE_TABS: Array<[WorkspaceView, string]> = [
   ['console', 'Konsol URL'],
 ];
 
+const WORKSPACE_FEATURE_MAP: Record<WorkspaceView, string> = {
+  preview: 'workspace_preview',
+  layout: 'workspace_layout',
+  seo: 'seo_analyzer_starter',
+  errors: 'xml_autofix_worker',
+  editor: 'workspace_editor',
+  splitter: 'workspace_splitter',
+  variables: 'workspace_inspector',
+  console: 'workspace_console',
+};
+
 export default function App() {
   const [toast, setToast] = useState<ToastState | null>(null);
 
@@ -208,8 +227,19 @@ function TemaLokaWorkspace({
 }) {
   const initialPreset = TEMPLATE_PRESETS[0];
   const saved = useMemo(() => loadInitialWorkspace(), []);
-  const { user, authReady, engineMode, quota, isChatOpen, setChatOpen, toggleChatOpen } =
-    useAuthAndAi();
+  const {
+    user,
+    authReady,
+    userTier,
+    isAdmin,
+    openAuthModal,
+    engineMode,
+    freellmModel,
+    quota,
+    isChatOpen,
+    setChatOpen,
+    toggleChatOpen,
+  } = useAuthAndAi();
 
   const [workspaceView, setWorkspaceView] = useState<WorkspaceView>('preview');
   const [sidebarTab, setSidebarTab] = useState<SidebarTab>('sumber');
@@ -275,6 +305,7 @@ function TemaLokaWorkspace({
   const [snapshots, setSnapshots] = useState<XmlSnapshotRecord[]>([]);
   const [snapshotDrawerOpen, setSnapshotDrawerOpen] = useState(false);
   const [notepadOpen, setNotepadOpen] = useState(false);
+  const [upgradeModalOpen, setUpgradeModalOpen] = useState(false);
   const offlineAi = useOfflineAiRuntime();
   const { isOfflineMode, setOfflineMode } = useAppOfflineMode();
   const siteAdsense = useSiteAdsense(user, authReady, isOfflineMode);
@@ -904,6 +935,24 @@ function TemaLokaWorkspace({
     return siteAdsense.shouldRenderLiveAds && Boolean(cfg.topBannerSlot);
   }, [siteAdsense.config, siteAdsense.isAdmin, siteAdsense.shouldRenderLiveAds]);
 
+  const activeProPlan = useMemo(
+    () => resolveUserProPlan(siteAdsense.premiumConfig, userTier, user?.proPlanId),
+    [siteAdsense.premiumConfig, userTier, user?.proPlanId]
+  );
+
+  const isAdFreeUser = useMemo(
+    () =>
+      !isAdmin &&
+      hasFreeAdsPrivilege(
+        siteAdsense.premiumConfig,
+        userTier,
+        false,
+        user?.featureOverrides,
+        user?.proPlanId
+      ),
+    [isAdmin, siteAdsense.premiumConfig, userTier, user]
+  );
+
   if (isAdminRoute) {
     return (
       <>
@@ -946,7 +995,7 @@ function TemaLokaWorkspace({
     <div className="h-[100dvh] w-screen overflow-hidden flex flex-col bg-[#F8FAFC] text-slate-900">
       {/* Top Bar: Responsive 3-Zone Contract (Hidden in Fullscreen) */}
       {!isFullscreen && (
-        <header className="h-12 lg:h-14 shrink-0 bg-white/95 backdrop-blur-md border-b border-slate-200 px-3 sm:px-5 flex items-center justify-between gap-2 sm:gap-4">
+        <header className="relative z-30 h-12 lg:h-14 shrink-0 bg-white border-b border-slate-200 px-3 sm:px-5 flex items-center justify-between gap-2 sm:gap-4">
           {/* Zone 1: Brand Wordmark + Desktop Sidebar Hide/Show Toggle */}
           <div className="flex items-center gap-1.5 shrink-0">
             <a
@@ -987,23 +1036,40 @@ function TemaLokaWorkspace({
           <nav className="hidden lg:flex items-center gap-4 xl:gap-5 text-xs xl:text-sm font-medium overflow-x-auto no-scrollbar">
             {WORKSPACE_TABS.map(([view, label]) => {
               const active = workspaceView === view;
+              const access = getFeatureAccessStatus(
+                WORKSPACE_FEATURE_MAP[view],
+                siteAdsense.premiumConfig,
+                userTier,
+                isAdmin,
+                user?.featureOverrides,
+                user?.proPlanId
+              );
+              const showProBadge =
+                siteAdsense.premiumConfig.enforcementEnabled &&
+                access.rule.tier === 'pro' &&
+                !access.allowed;
               return (
                 <button
                   key={view}
                   type="button"
                   onClick={() => setWorkspaceView(view)}
-                  className={`py-1.5 border-b-2 transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                  className={`py-1.5 border-b-2 transition-colors whitespace-nowrap shrink-0 cursor-pointer flex items-center gap-1 ${
                     active
                       ? 'border-blue-600 text-slate-900 font-semibold'
                       : 'border-transparent text-slate-600 hover:text-slate-900'
                   }`}
                 >
-                  {label}
+                  <span>{label}</span>
+                  {showProBadge && (
+                    <span className="inline-flex items-center px-1 py-0.5 text-[9px] font-bold bg-amber-100 text-amber-900 border border-amber-300 rounded">
+                      PRO
+                    </span>
+                  )}
                   {view === 'variables' &&
                     activeAiSignatureSummary.highConfidenceCount > 0 && (
                       <span
                         title={`${activeAiSignatureSummary.highConfidenceCount} AI Signature terdeteksi otomatis`}
-                        className="ml-1.5 px-1.5 py-0.5 text-[10px] font-mono font-semibold bg-amber-100 text-amber-900 border border-amber-300 rounded tabular-nums"
+                        className="ml-0.5 px-1.5 py-0.5 text-[10px] font-mono font-semibold bg-amber-100 text-amber-900 border border-amber-300 rounded tabular-nums"
                       >
                         AI {activeAiSignatureSummary.findings.length}
                       </span>
@@ -1013,19 +1079,29 @@ function TemaLokaWorkspace({
             })}
           </nav>
 
-          {/* Zone 3: Responsive Account/Limit + Chat AI + Fullscreen + Tools + Export */}
-          <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
-            <GoogleAccountButton isOfflineMode={isOfflineMode} />
+          {/* Zone 3: Responsive Mobile-Visible Online Switch + Account + Chat AI + Fullscreen + Tools + Export */}
+          <div className="flex items-center gap-1 sm:gap-2 shrink-0">
+            {/* Directly visible on Smartphone AND Desktop! */}
+            <OnlineOfflineToggle onNotify={notify} />
+
+            <GoogleAccountButton
+              isOfflineMode={isOfflineMode}
+              onOpenAdminPanel={openAdminRoute}
+              onOpenUpgradeModal={() => setUpgradeModalOpen(true)}
+              showUpgradeButton={!isAdmin && userTier === 'free'}
+              isAdFree={isAdFreeUser}
+              activeProPlanName={activeProPlan?.name || null}
+            />
 
             {siteAdsense.isAdmin && (
               <button
                 type="button"
                 onClick={openAdminRoute}
-                title="Buka Panel Admin AdSense (/?admin)"
+                title="Buka Panel Admin"
                 className="hidden sm:flex items-center gap-1.5 px-2.5 py-1.5 min-h-[34px] text-xs font-semibold rounded-lg border border-emerald-200 bg-emerald-50 hover:bg-emerald-100 text-emerald-800 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
               >
                 <ShieldCheck className="w-3.5 h-3.5 shrink-0" />
-                <span>Admin AdSense</span>
+                <span>Admin Panel</span>
               </button>
             )}
 
@@ -1056,7 +1132,7 @@ function TemaLokaWorkspace({
               type="button"
               onClick={toggleChatOpen}
               title="Buka / Tutup Kolom Chat AI"
-              className={`flex items-center gap-1 px-2 sm:px-2.5 py-1.5 min-h-[38px] sm:min-h-[34px] text-xs font-semibold rounded-lg border transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+              className={`flex items-center gap-1 px-2 sm:px-2.5 py-1.5 min-h-[36px] sm:min-h-[34px] text-xs font-semibold rounded-lg border transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
                 isChatOpen
                   ? 'bg-slate-900 text-white border-slate-900'
                   : 'bg-blue-50 hover:bg-blue-100 text-blue-800 border-blue-200'
@@ -1072,15 +1148,14 @@ function TemaLokaWorkspace({
               onClick={toggleFullscreen}
               title="Mode Layar Penuh (Fullscreen) untuk Desktop & Smartphone"
               aria-label="Aktifkan Layar Penuh"
-              className="flex items-center justify-center gap-1 px-2 sm:px-2.5 py-1.5 min-h-[38px] min-w-[38px] sm:min-h-[34px] text-xs font-medium text-slate-700 bg-white hover:bg-slate-100 border border-slate-200 rounded-lg transition-colors shrink-0 cursor-pointer"
+              className="hidden sm:flex items-center justify-center gap-1 px-2.5 py-1.5 min-h-[34px] text-xs font-medium text-slate-700 bg-white hover:bg-slate-100 border border-slate-200 rounded-lg transition-colors shrink-0 cursor-pointer"
             >
               <Maximize2 className="w-3.5 h-3.5" />
               <span className="hidden xl:inline">Layar Penuh</span>
             </button>
 
-            {/* Desktop Full Action Controls */}
+            {/* Desktop Offline Sync + PWA Install */}
             <div className="hidden md:flex items-center gap-1.5 sm:gap-2">
-              <OnlineOfflineToggle onNotify={notify} />
               <OfflineSyncReloadButton onNotify={notify} />
               <PWAInstallButton />
             </div>
@@ -1105,30 +1180,31 @@ function TemaLokaWorkspace({
               <span className="hidden sm:inline">Ekspor Tema XML</span>
             </button>
 
-            {/* Smartphone Compact Overflow Menu (Export + Limit Info + Online/Offline + PWA) */}
+            {/* Smartphone Compact Overflow Menu */}
             <div ref={mobileMoreRef} className="md:hidden relative shrink-0">
               <button
                 type="button"
                 onClick={() => setMobileMoreOpen((v) => !v)}
                 aria-label="Menu Lainnya & Ekspor"
                 aria-expanded={mobileMoreOpen}
-                className="flex items-center justify-center min-h-[38px] min-w-[38px] rounded-lg border border-slate-200 bg-white hover:bg-slate-50 text-slate-700 cursor-pointer"
+                className="flex items-center justify-center min-h-[36px] min-w-[36px] rounded-lg border border-slate-200 bg-white hover:bg-slate-50 text-slate-700 cursor-pointer"
               >
                 <MoreVertical className="w-4 h-4" />
               </button>
 
               {mobileMoreOpen && (
-                <div className="fixed left-3 right-3 top-14 bg-white border border-slate-200 rounded-xl shadow-xl z-50 p-3.5 space-y-3 text-xs">
-                  {/* Explicit Limit & Engine Summary */}
+                <div className="fixed left-3 right-3 top-14 bg-white border border-slate-200 rounded-xl shadow-xl z-50 p-3.5 space-y-2.5 text-xs max-h-[82dvh] overflow-y-auto">
                   <div className="p-2.5 rounded-lg bg-slate-50 border border-slate-200 flex items-center justify-between gap-2">
                     <div className="min-w-0">
                       <div className="font-bold text-slate-900">Info Limit &amp; Mesin AI</div>
-                      <div className="text-[11px] text-slate-600 font-mono tabular-nums mt-0.5">
+                      <div className="text-[11px] text-slate-600 font-mono tabular-nums mt-0.5 truncate">
                         {isOfflineMode || engineMode === 'local'
                           ? 'AI Lokal Aktif · Tanpa Limit (0 Kuota)'
-                          : user
-                            ? `Gemini · Sisa ${quota.remaining}/${quota.dailyLimit} hari ini`
-                            : `Gemini · Limit ${quota.dailyLimit}/hari (Masuk Google)`}
+                          : engineMode === 'freellm'
+                            ? `FreeLLMAPI (${freellmModel}) · Tanpa Kuota Gemini`
+                            : user
+                              ? `Gemini · Sisa ${quota.remaining}/${quota.dailyLimit} hari ini`
+                              : `Gemini · Limit ${quota.dailyLimit}/hari`}
                       </div>
                     </div>
                     <button
@@ -1164,16 +1240,31 @@ function TemaLokaWorkspace({
                   {siteAdsense.isAdmin && (
                     <button
                       type="button"
-                      onClick={openAdminRoute}
+                      onClick={() => {
+                        setMobileMoreOpen(false);
+                        openAdminRoute();
+                      }}
                       className="w-full flex items-center justify-between gap-2 py-2.5 min-h-[42px] px-3 bg-emerald-50 hover:bg-emerald-100 text-emerald-900 border border-emerald-200 font-semibold rounded-lg cursor-pointer"
                     >
                       <span className="flex items-center gap-2">
                         <ShieldCheck className="w-4 h-4 text-emerald-700" />
-                        <span>Panel Admin AdSense (/?admin)</span>
+                        <span>Panel Admin</span>
                       </span>
-                      <span className="text-[11px] font-mono text-emerald-700">Kelola</span>
+                      <span className="text-[11px] font-mono text-emerald-700">Aktif</span>
                     </button>
                   )}
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setMobileMoreOpen(false);
+                      toggleFullscreen();
+                    }}
+                    className="w-full flex items-center justify-center gap-2 py-2.5 min-h-[42px] px-3 bg-slate-100 hover:bg-slate-200 text-slate-800 font-semibold rounded-lg cursor-pointer"
+                  >
+                    <Maximize2 className="w-4 h-4" />
+                    <span>Mode Layar Penuh</span>
+                  </button>
 
                   <button
                     type="button"
@@ -1220,26 +1311,45 @@ function TemaLokaWorkspace({
             )}
           </button>
 
-          {WORKSPACE_TABS.map(([view, label]) => (
-            <button
-              key={view}
-              type="button"
-              onClick={() => setWorkspaceView(view)}
-              className={`whitespace-nowrap shrink-0 py-1.5 border-b-2 cursor-pointer ${
-                workspaceView === view
-                  ? 'border-blue-600 text-slate-900 font-semibold'
-                  : 'border-transparent text-slate-600'
-              }`}
-            >
-              {label}
-              {view === 'variables' &&
-                activeAiSignatureSummary.highConfidenceCount > 0 && (
-                  <span className="ml-1 px-1 py-0.5 text-[10px] font-mono font-semibold bg-amber-100 text-amber-900 border border-amber-300 rounded tabular-nums">
-                    AI {activeAiSignatureSummary.findings.length}
+          {WORKSPACE_TABS.map(([view, label]) => {
+            const access = getFeatureAccessStatus(
+              WORKSPACE_FEATURE_MAP[view],
+              siteAdsense.premiumConfig,
+              userTier,
+              isAdmin,
+              user?.featureOverrides,
+              user?.proPlanId
+            );
+            const showProBadge =
+              siteAdsense.premiumConfig.enforcementEnabled &&
+              access.rule.tier === 'pro' &&
+              !access.allowed;
+            return (
+              <button
+                key={view}
+                type="button"
+                onClick={() => setWorkspaceView(view)}
+                className={`whitespace-nowrap shrink-0 py-1.5 border-b-2 cursor-pointer flex items-center gap-1 ${
+                  workspaceView === view
+                    ? 'border-blue-600 text-slate-900 font-semibold'
+                    : 'border-transparent text-slate-600'
+                }`}
+              >
+                <span>{label}</span>
+                {showProBadge && (
+                  <span className="px-1 py-0.5 text-[9px] font-bold bg-amber-100 text-amber-900 border border-amber-300 rounded">
+                    PRO
                   </span>
                 )}
-            </button>
-          ))}
+                {view === 'variables' &&
+                  activeAiSignatureSummary.highConfidenceCount > 0 && (
+                    <span className="ml-0.5 px-1 py-0.5 text-[10px] font-mono font-semibold bg-amber-100 text-amber-900 border border-amber-300 rounded tabular-nums">
+                      AI {activeAiSignatureSummary.findings.length}
+                    </span>
+                  )}
+              </button>
+            );
+          })}
         </div>
       )}
 
@@ -1433,152 +1543,238 @@ function TemaLokaWorkspace({
         )}
 
         {workspaceView === 'layout' && (
-          <BloggerLayoutView
-            xml={xmlSource}
-            parsedInfo={parsedInfo}
-            offlineAi={offlineAi}
-            onUpdateXml={handleDirectXmlUpdate}
-            onSaveOverwriteAndDownload={(nextXml) =>
-              handleSaveOverwriteAndDownload(nextXml, { download: true })
-            }
-            onOpenInspectorWidgets={() => setWorkspaceView('variables')}
-          />
+          <ProFeatureGate
+            featureId="workspace_layout"
+            premiumConfig={siteAdsense.premiumConfig}
+            paymentConfig={siteAdsense.paymentConfig}
+            user={user}
+            userTier={userTier}
+            isAdmin={isAdmin}
+            onOpenAuthModal={openAuthModal}
+            onOpenPaymentModal={() => setUpgradeModalOpen(true)}
+            onOpenAdminPanel={openAdminRoute}
+          >
+            <BloggerLayoutView
+              xml={xmlSource}
+              parsedInfo={parsedInfo}
+              offlineAi={offlineAi}
+              onUpdateXml={handleDirectXmlUpdate}
+              onSaveOverwriteAndDownload={(nextXml) =>
+                handleSaveOverwriteAndDownload(nextXml, { download: true })
+              }
+              onOpenInspectorWidgets={() => setWorkspaceView('variables')}
+            />
+          </ProFeatureGate>
         )}
 
         {workspaceView === 'seo' && (
-          <SeoMonetizationView
-            xml={xmlSource}
-            parsedInfo={parsedInfo}
-            offlineAi={offlineAi}
-            onUpdateXml={handleDirectXmlUpdate}
-            isOfflineMode={isOfflineMode}
-            onSwitchToOnline={handleSwitchToOnline}
-            initialBlogUrl={sharedBlogUrl || userBlogVisualUrl}
-            onNotify={notify}
-            defaultAdsensePubId={
-              siteAdsense.config.defaultTemplatePubId || siteAdsense.config.publisherId
-            }
-            siteAdsense={siteAdsenseSlotProps}
-          />
+          <ProFeatureGate
+            featureId="seo_analyzer_starter"
+            premiumConfig={siteAdsense.premiumConfig}
+            paymentConfig={siteAdsense.paymentConfig}
+            user={user}
+            userTier={userTier}
+            isAdmin={isAdmin}
+            onOpenAuthModal={openAuthModal}
+            onOpenPaymentModal={() => setUpgradeModalOpen(true)}
+            onOpenAdminPanel={openAdminRoute}
+          >
+            <SeoMonetizationView
+              xml={xmlSource}
+              parsedInfo={parsedInfo}
+              offlineAi={offlineAi}
+              onUpdateXml={handleDirectXmlUpdate}
+              isOfflineMode={isOfflineMode}
+              onSwitchToOnline={handleSwitchToOnline}
+              initialBlogUrl={
+                sharedBlogUrl || userBlogVisualUrl || siteAdsense.seoConfig.defaultBlogUrl
+              }
+              onNotify={notify}
+              defaultAdsensePubId={
+                siteAdsense.config.defaultTemplatePubId || siteAdsense.config.publisherId
+              }
+              siteAdsense={siteAdsenseSlotProps}
+            />
+          </ProFeatureGate>
         )}
 
         {workspaceView === 'errors' && (
-          <BloggerErrorAnalyzerView
-            xml={xmlSource}
-            parsedInfo={parsedInfo}
-            offlineAi={offlineAi}
-            onUpdateXml={handleDirectXmlUpdate}
-            onJumpToEditorLine={handleJumpToEditorLine}
-          />
+          <ProFeatureGate
+            featureId="xml_autofix_worker"
+            premiumConfig={siteAdsense.premiumConfig}
+            paymentConfig={siteAdsense.paymentConfig}
+            user={user}
+            userTier={userTier}
+            isAdmin={isAdmin}
+            onOpenAuthModal={openAuthModal}
+            onOpenPaymentModal={() => setUpgradeModalOpen(true)}
+            onOpenAdminPanel={openAdminRoute}
+          >
+            <BloggerErrorAnalyzerView
+              xml={xmlSource}
+              parsedInfo={parsedInfo}
+              offlineAi={offlineAi}
+              onUpdateXml={handleDirectXmlUpdate}
+              onJumpToEditorLine={handleJumpToEditorLine}
+            />
+          </ProFeatureGate>
         )}
 
         {workspaceView === 'editor' && (
-          <XmlEditorView
-            xml={xmlSource}
-            customCss={customCss}
-            parsedInfo={parsedInfo}
-            offlineAi={offlineAi}
-            focusLine={editorFocusLine}
-            onApplyXml={(nextXml) => {
-              setXmlSource(nextXml);
-              setActivePresetId(null);
-              setSourceLabel('Editor XML Manual');
-              recordSnapshot(nextXml, 'Perubahan Editor XML', 'editor', false);
-            }}
-            onSaveOverwriteAndDownload={(editedXml) =>
-              handleSaveOverwriteAndDownload(editedXml, { download: true })
-            }
-            onCustomCssChange={setCustomCss}
-            onNotify={notify}
-            onSendToUrlConsole={(item) => {
-              setPendingConsolePayload({
-                id: Date.now(),
-                payload: item.payload,
-                kind: item.kind,
-                runNow: item.runNow,
-              });
-              setWorkspaceView('console');
-            }}
-            onOpenSnapshots={() => setSnapshotDrawerOpen(true)}
-            snapshotCount={snapshots.length}
-            previewQueryParams={previewQueryParams}
-            onApplyPreviewQueryParams={handleApplyPreviewQueryParams}
-            onResetPreviewQueryParams={handleResetPreviewQueryParams}
-          />
+          <ProFeatureGate
+            featureId="workspace_editor"
+            premiumConfig={siteAdsense.premiumConfig}
+            paymentConfig={siteAdsense.paymentConfig}
+            user={user}
+            userTier={userTier}
+            isAdmin={isAdmin}
+            onOpenAuthModal={openAuthModal}
+            onOpenPaymentModal={() => setUpgradeModalOpen(true)}
+            onOpenAdminPanel={openAdminRoute}
+          >
+            <XmlEditorView
+              xml={xmlSource}
+              customCss={customCss}
+              parsedInfo={parsedInfo}
+              offlineAi={offlineAi}
+              focusLine={editorFocusLine}
+              onApplyXml={(nextXml) => {
+                setXmlSource(nextXml);
+                setActivePresetId(null);
+                setSourceLabel('Editor XML Manual');
+                recordSnapshot(nextXml, 'Perubahan Editor XML', 'editor', false);
+              }}
+              onSaveOverwriteAndDownload={(editedXml) =>
+                handleSaveOverwriteAndDownload(editedXml, { download: true })
+              }
+              onCustomCssChange={setCustomCss}
+              onNotify={notify}
+              onSendToUrlConsole={(item) => {
+                setPendingConsolePayload({
+                  id: Date.now(),
+                  payload: item.payload,
+                  kind: item.kind,
+                  runNow: item.runNow,
+                });
+                setWorkspaceView('console');
+              }}
+              onOpenSnapshots={() => setSnapshotDrawerOpen(true)}
+              snapshotCount={snapshots.length}
+              previewQueryParams={previewQueryParams}
+              onApplyPreviewQueryParams={handleApplyPreviewQueryParams}
+              onResetPreviewQueryParams={handleResetPreviewQueryParams}
+            />
+          </ProFeatureGate>
         )}
 
         {workspaceView === 'variables' && (
-          <VariableInspectorView
-            xml={xmlSource}
-            parsedInfo={parsedInfo}
-            variableValues={variableValues}
-            onVariableChange={handleVariableChange}
-            onResetVariable={handleResetVariable}
-            cssVarValues={cssVarValues}
-            onCssVarChange={handleCssVarChange}
-            onResetCssVar={handleResetCssVar}
-            colorReplacements={colorReplacements}
-            onColorReplace={handleColorReplace}
-            onResetColorReplace={handleResetColorReplace}
-            onUpdateXml={handleDirectXmlUpdate}
-            onOpenXmlEditor={() => setWorkspaceView('editor')}
-            onJumpToEditorLine={handleJumpToEditorLine}
-            offlineAi={offlineAi}
-            activePresetId={activePresetId}
-            sourceLabel={sourceLabel}
-            onLoadXmlContent={handleLoadXmlContent}
-            isOfflineMode={isOfflineMode}
-            onNotify={notify}
-          />
+          <ProFeatureGate
+            featureId="workspace_inspector"
+            premiumConfig={siteAdsense.premiumConfig}
+            paymentConfig={siteAdsense.paymentConfig}
+            user={user}
+            userTier={userTier}
+            isAdmin={isAdmin}
+            onOpenAuthModal={openAuthModal}
+            onOpenPaymentModal={() => setUpgradeModalOpen(true)}
+            onOpenAdminPanel={openAdminRoute}
+          >
+            <VariableInspectorView
+              xml={xmlSource}
+              parsedInfo={parsedInfo}
+              variableValues={variableValues}
+              onVariableChange={handleVariableChange}
+              onResetVariable={handleResetVariable}
+              cssVarValues={cssVarValues}
+              onCssVarChange={handleCssVarChange}
+              onResetCssVar={handleResetCssVar}
+              colorReplacements={colorReplacements}
+              onColorReplace={handleColorReplace}
+              onResetColorReplace={handleResetColorReplace}
+              onUpdateXml={handleDirectXmlUpdate}
+              onOpenXmlEditor={() => setWorkspaceView('editor')}
+              onJumpToEditorLine={handleJumpToEditorLine}
+              offlineAi={offlineAi}
+              activePresetId={activePresetId}
+              sourceLabel={sourceLabel}
+              onLoadXmlContent={handleLoadXmlContent}
+              isOfflineMode={isOfflineMode}
+              onNotify={notify}
+            />
+          </ProFeatureGate>
         )}
 
         {workspaceView === 'splitter' && (
-          <XmlSplitterMergerView
-            xml={xmlSource}
-            sourceLabel={sourceLabel}
-            parsedInfo={parsedInfo}
-            offlineAi={offlineAi}
-            onApplyMergedXml={(nextXml, label, openView) => {
-              handleLoadXmlContent(nextXml, label, null);
-              setWorkspaceView(openView || 'preview');
-              notify(
-                `Hasil penggabungan XML dimuat ke ${openView === 'editor' ? 'Editor XML' : 'Pratinjau'}.`,
-                'success'
-              );
-            }}
-            onNotify={notify}
-          />
+          <ProFeatureGate
+            featureId="workspace_splitter"
+            premiumConfig={siteAdsense.premiumConfig}
+            paymentConfig={siteAdsense.paymentConfig}
+            user={user}
+            userTier={userTier}
+            isAdmin={isAdmin}
+            onOpenAuthModal={openAuthModal}
+            onOpenPaymentModal={() => setUpgradeModalOpen(true)}
+            onOpenAdminPanel={openAdminRoute}
+          >
+            <XmlSplitterMergerView
+              xml={xmlSource}
+              sourceLabel={sourceLabel}
+              parsedInfo={parsedInfo}
+              offlineAi={offlineAi}
+              onApplyMergedXml={(nextXml, label, openView) => {
+                handleLoadXmlContent(nextXml, label, null);
+                setWorkspaceView(openView || 'preview');
+                notify(
+                  `Hasil penggabungan XML dimuat ke ${openView === 'editor' ? 'Editor XML' : 'Pratinjau'}.`,
+                  'success'
+                );
+              }}
+              onNotify={notify}
+            />
+          </ProFeatureGate>
         )}
 
         {workspaceView === 'console' && (
-          <UrlConsoleView
-            xml={xmlSource}
-            parsedInfo={parsedInfo}
-            sharedBlogUrl={sharedBlogUrl}
-            onSharedBlogUrlChange={setSharedBlogUrl}
-            liveFingerprint={liveBlogFingerprint}
-            comparisonResult={liveBlogComparison}
-            userBlogVisualHtml={userBlogVisualHtml}
-            onBlogFingerprintFetched={handleBlogFingerprintFetched}
-            onOpenUserBlogPreview={() => {
-              if (userBlogVisualHtml) {
-                setPreviewVisualMode('user-site');
-                setWorkspaceView('preview');
-              }
-            }}
-            previewConsoleLogs={previewConsoleLogs}
-            onClearPreviewLogs={() => setPreviewConsoleLogs([])}
-            pendingConsolePayload={pendingConsolePayload}
-            onConsumePendingConsolePayload={() => setPendingConsolePayload(null)}
-            isOfflineMode={isOfflineMode}
-            onSwitchToOnline={handleSwitchToOnline}
-            onJumpToEditorLine={handleJumpToEditorLine}
-            previewQueryParams={previewQueryParams}
-            onApplyPreviewQueryParams={handleApplyPreviewQueryParams}
-            onResetPreviewQueryParams={handleResetPreviewQueryParams}
-            offlineAi={offlineAi}
-            onNotify={notify}
-          />
+          <ProFeatureGate
+            featureId="workspace_console"
+            premiumConfig={siteAdsense.premiumConfig}
+            paymentConfig={siteAdsense.paymentConfig}
+            user={user}
+            userTier={userTier}
+            isAdmin={isAdmin}
+            onOpenAuthModal={openAuthModal}
+            onOpenPaymentModal={() => setUpgradeModalOpen(true)}
+            onOpenAdminPanel={openAdminRoute}
+          >
+            <UrlConsoleView
+              xml={xmlSource}
+              parsedInfo={parsedInfo}
+              sharedBlogUrl={sharedBlogUrl}
+              onSharedBlogUrlChange={setSharedBlogUrl}
+              liveFingerprint={liveBlogFingerprint}
+              comparisonResult={liveBlogComparison}
+              userBlogVisualHtml={userBlogVisualHtml}
+              onBlogFingerprintFetched={handleBlogFingerprintFetched}
+              onOpenUserBlogPreview={() => {
+                if (userBlogVisualHtml) {
+                  setPreviewVisualMode('user-site');
+                  setWorkspaceView('preview');
+                }
+              }}
+              previewConsoleLogs={previewConsoleLogs}
+              onClearPreviewLogs={() => setPreviewConsoleLogs([])}
+              pendingConsolePayload={pendingConsolePayload}
+              onConsumePendingConsolePayload={() => setPendingConsolePayload(null)}
+              isOfflineMode={isOfflineMode}
+              onSwitchToOnline={handleSwitchToOnline}
+              onJumpToEditorLine={handleJumpToEditorLine}
+              previewQueryParams={previewQueryParams}
+              onApplyPreviewQueryParams={handleApplyPreviewQueryParams}
+              onResetPreviewQueryParams={handleResetPreviewQueryParams}
+              offlineAi={offlineAi}
+              onNotify={notify}
+            />
+          </ProFeatureGate>
         )}
 
         {/* Right Docked / Fullscreen-Safe AI Chat Column */}
@@ -1753,6 +1949,18 @@ function TemaLokaWorkspace({
             <div className="grid grid-cols-2 gap-2">
               {WORKSPACE_TABS.map(([view, label]) => {
                 const active = workspaceView === view;
+                const access = getFeatureAccessStatus(
+                  WORKSPACE_FEATURE_MAP[view],
+                  siteAdsense.premiumConfig,
+                  userTier,
+                  isAdmin,
+                  user?.featureOverrides,
+                  user?.proPlanId
+                );
+                const showProBadge =
+                  siteAdsense.premiumConfig.enforcementEnabled &&
+                  access.rule.tier === 'pro' &&
+                  !access.allowed;
                 return (
                   <button
                     key={view}
@@ -1768,6 +1976,12 @@ function TemaLokaWorkspace({
                     }`}
                   >
                     <span className="truncate">{label}</span>
+                    {showProBadge && (
+                      <span className="inline-flex items-center gap-0.5 px-1.5 py-0.5 text-[9px] font-bold bg-amber-100 text-amber-900 border border-amber-300 rounded shrink-0">
+                        <Crown className="w-2.5 h-2.5" />
+                        PRO
+                      </span>
+                    )}
                     {view === 'variables' &&
                       activeAiSignatureSummary.highConfidenceCount > 0 && (
                         <span className="px-1.5 py-0.5 text-[10px] font-mono bg-amber-100 text-amber-900 rounded tabular-nums shrink-0">
@@ -1801,6 +2015,19 @@ function TemaLokaWorkspace({
                 <Download className="w-4 h-4" />
                 <span>Ekspor XML</span>
               </button>
+              {siteAdsense.isAdmin && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setMobileStudioSheetOpen(false);
+                    openAdminRoute();
+                  }}
+                  className="col-span-2 min-h-[44px] px-3 py-2 rounded-xl border border-emerald-200 bg-emerald-50 text-emerald-900 text-xs font-semibold flex items-center justify-center gap-2 cursor-pointer"
+                >
+                  <ShieldCheck className="w-4 h-4 text-emerald-700" />
+                  <span>Buka Panel Admin</span>
+                </button>
+              )}
             </div>
           </div>
         </div>
@@ -1867,6 +2094,17 @@ function TemaLokaWorkspace({
         sourceLabel={sourceLabel}
         xmlByteSize={currentXmlBytes}
         isOfflineMode={isOfflineMode}
+        onNotify={notify}
+      />
+
+      {/* Pro Upgrade & Manual Payment Modal */}
+      <ProUpgradePaymentModal
+        isOpen={upgradeModalOpen}
+        onClose={() => setUpgradeModalOpen(false)}
+        paymentConfig={siteAdsense.paymentConfig}
+        premiumConfig={siteAdsense.premiumConfig}
+        user={user}
+        onOpenAuthModal={openAuthModal}
         onNotify={notify}
       />
 

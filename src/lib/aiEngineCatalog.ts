@@ -1,4 +1,4 @@
-export type AiEngineMode = 'local' | 'gemini';
+export type AiEngineMode = 'local' | 'freellm' | 'gemini';
 
 export type CallableGeminiModelId = 'gemini-3.1-flash-lite';
 
@@ -18,6 +18,74 @@ export interface GeminiModelOption {
   description: string;
   disabledNotice?: string;
 }
+
+export interface FreeLlmModelOption {
+  id: string;
+  label: string;
+  shortLabel: string;
+  badge: string;
+  description: string;
+}
+
+export const FREELLM_MODELS: FreeLlmModelOption[] = [
+  {
+    id: 'auto',
+    label: 'FreeLLMAPI Auto (Smart Failover)',
+    shortLabel: 'Auto Router',
+    badge: 'Rekomendasi',
+    description:
+      'Memilih provider tercepat & tersedia secara otomatis (Groq, Cerebras, OpenRouter, Mistral, NIM, Cloudflare AI, Gemini Compat) dengan auto-failover.',
+  },
+  {
+    id: 'auto:fastest',
+    label: 'FreeLLMAPI Auto: Fastest (Low Latency)',
+    shortLabel: 'Fastest',
+    badge: 'Kilat',
+    description: 'Prioritas respons tercepat untuk edit CSS instan, chat cepat, & validasi XML.',
+  },
+  {
+    id: 'auto:smartest',
+    label: 'FreeLLMAPI Auto: Smartest (Deep Reasoning)',
+    shortLabel: 'Smartest',
+    badge: 'Analisis',
+    description: 'Prioritas model berkapasitas penalaran tinggi untuk audit XML, SEO, & refactoring kode.',
+  },
+  {
+    id: 'llama-3.3-70b-versatile',
+    label: 'Llama 3.3 70B Versatile',
+    shortLabel: 'Llama 3.3 70B',
+    badge: '70B',
+    description: 'Model serbaguna 70B untuk memahami struktur HTML/XML Blogger dan menulis CSS responsif.',
+  },
+  {
+    id: 'qwen-2.5-coder-32b',
+    label: 'Qwen 2.5 Coder 32B',
+    shortLabel: 'Qwen Coder 32B',
+    badge: 'Kode XML',
+    description: 'Dioptimalkan khusus untuk parsing XML, sintaks Blogger <b:if>, dan JavaScript.',
+  },
+  {
+    id: 'deepseek-r1-distill-llama-70b',
+    label: 'DeepSeek R1 Distill 70B',
+    shortLabel: 'DeepSeek R1',
+    badge: 'Reasoning',
+    description: 'Penalaran bertahap untuk debugging error XML & optimasi struktur DOM.',
+  },
+  {
+    id: 'mistral-small-latest',
+    label: 'Mistral Small Latest',
+    shortLabel: 'Mistral Small',
+    badge: 'Cepat',
+    description: 'Ringkas dan stabil untuk konten sampel Bahasa Indonesia dan saran SEO.',
+  },
+  {
+    id: 'llama-3.1-8b-instant',
+    label: 'Llama 3.1 8B Instant',
+    shortLabel: 'Llama 8B',
+    badge: 'Ringan',
+    description: 'Sangat cepat dan hemat kuota upstream untuk tugas CSS dan chat ringan.',
+  },
+];
 
 export const GEMINI_MODELS: GeminiModelOption[] = [
   {
@@ -74,5 +142,11 @@ export function isCallableGeminiModel(modelId: string): modelId is CallableGemin
 export function getGeminiModelOption(modelId: string): GeminiModelOption {
   return (
     GEMINI_MODELS.find((m) => m.id === modelId) || GEMINI_MODELS[0]
+  );
+}
+
+export function getFreeLlmModelOption(modelId: string): FreeLlmModelOption {
+  return (
+    FREELLM_MODELS.find((m) => m.id === modelId) || FREELLM_MODELS[0]
   );
 }

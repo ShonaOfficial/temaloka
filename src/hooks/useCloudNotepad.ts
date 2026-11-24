@@ -1,25 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import {
-  collection,
-  deleteDoc,
-  doc,
-  getDoc,
-  limit,
-  onSnapshot,
-  query,
-  serverTimestamp,
-  setDoc,
-  updateDoc,
-  where,
-  type Timestamp,
-} from 'firebase/firestore';
 import { useAuthAndAi } from '../contexts/AuthAndAiContext';
-import {
-  auth,
-  db,
-  handleFirestoreError,
-  OperationType,
-} from '../lib/firebase';
 
 export type NoteTag = 'umum' | 'xml' | 'css' | 'url' | 'ide';
 
@@ -143,16 +123,15 @@ export function useCloudNotepad(options?: {
 }) {
   const {
     user,
+    sessionToken,
     authReady,
-    signInWithGoogle,
-    engineMode,
-    geminiModel,
+    openAuthModal,
     onNotify,
   } = useAuthAndAi();
 
   const activeTemplateTitle = options?.activeTemplateTitle || '';
   const isOfflineMode = Boolean(options?.isOfflineMode);
-  const accountUid = user?.uid || null;
+  const accountUid = user?.id || null;
 
   const [cloudNotesMap, setCloudNotesMap] = useState<Record<string, CloudNotepadNote>>({});
   const [draftsMap, setDraftsMap] = useState<StoredDraftMap>(() =>
@@ -163,7 +142,6 @@ export function useCloudNotepad(options?: {
   const [deletingNoteIds, setDeletingNoteIds] = useState<Record<string, boolean>>({});
   const [cloudLoading, setCloudLoading] = useState(false);
 
-  // Load local drafts specific to the active account (guest vs signed-in uid)
   useEffect(() => {
     const loaded = loadDraftsForAccount(accountUid);
     setDraftsMap(loaded);
@@ -172,77 +150,65 @@ export function useCloudNotepad(options?: {
     setSelectedNoteId(firstId);
   }, [accountUid]);
 
-  // Persist local drafts whenever changed
   useEffect(() => {
     saveDraftsForAccount(accountUid, draftsMap);
   }, [accountUid, draftsMap]);
 
-  // Subscribe to Firestore notes only for the authenticated account
+  // Fetch notes from Cloudflare D1 when authenticated
   useEffect(() => {
-    if (!authReady || !user) {
-      setCloudNotesMap({});
+    if (!authReady || !user || !sessionToken || isOfflineMode) {
+      if (!user) setCloudNotesMap({});
       setCloudLoading(false);
       return;
     }
 
+    let cancelled = false;
     setCloudLoading(true);
-    const notesPath = `users/${user.uid}/notes`;
-    const notesQuery = query(
-      collection(db, 'users', user.uid, 'notes'),
-      where('uid', '==', user.uid),
-      limit(100)
-    );
-
-    const unsubscribe = onSnapshot(
-      notesQuery,
-      (snapshot) => {
+    fetch('/api/notes', {
+      headers: { Authorization: `Bearer ${sessionToken}` },
+    })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data: {
+        notes?: Array<{
+          id: string;
+          title: string;
+          content: string;
+          tag: string;
+          pinned: boolean;
+          templateHint: string;
+          createdAtMs: number;
+          updatedAtMs: number;
+        }>;
+      } | null) => {
+        if (cancelled || !data?.notes) return;
         const nextCloud: Record<string, CloudNotepadNote> = {};
-        for (const docSnap of snapshot.docs) {
-          const data = docSnap.data() as {
-            title?: string;
-            content?: string;
-            tag?: string;
-            pinned?: boolean;
-            templateHint?: string;
-            createdAt?: Timestamp | null;
-            updatedAt?: Timestamp | null;
-          };
-          const createdAtMs =
-            data.createdAt && typeof data.createdAt.toMillis === 'function'
-              ? data.createdAt.toMillis()
-              : Date.now();
-          const updatedAtMs =
-            data.updatedAt && typeof data.updatedAt.toMillis === 'function'
-              ? data.updatedAt.toMillis()
-              : createdAtMs;
-
-          nextCloud[docSnap.id] = {
-            id: docSnap.id,
-            title: (data.title || 'Catatan Tanpa Judul').slice(0, MAX_NOTE_TITLE_LENGTH),
-            content: (data.content || '').slice(0, MAX_NOTE_CONTENT_LENGTH),
-            tag: normalizeTag(data.tag),
-            pinned: Boolean(data.pinned),
-            templateHint: (data.templateHint || '').slice(0, MAX_NOTE_TEMPLATE_HINT_LENGTH),
-            createdAtMs,
-            updatedAtMs,
-            cloudSyncedAtMs: updatedAtMs,
+        for (const n of data.notes) {
+          nextCloud[n.id] = {
+            id: n.id,
+            title: (n.title || 'Catatan Tanpa Judul').slice(0, MAX_NOTE_TITLE_LENGTH),
+            content: (n.content || '').slice(0, MAX_NOTE_CONTENT_LENGTH),
+            tag: normalizeTag(n.tag),
+            pinned: Boolean(n.pinned),
+            templateHint: (n.templateHint || '').slice(0, MAX_NOTE_TEMPLATE_HINT_LENGTH),
+            createdAtMs: n.createdAtMs,
+            updatedAtMs: n.updatedAtMs,
+            cloudSyncedAtMs: n.updatedAtMs,
             inCloud: true,
             dirty: false,
           };
         }
         setCloudNotesMap(nextCloud);
-        setCloudLoading(false);
-      },
-      (err) => {
-        setCloudLoading(false);
-        handleFirestoreError(err, OperationType.LIST, notesPath);
-      }
-    );
+      })
+      .catch(() => {})
+      .finally(() => {
+        if (!cancelled) setCloudLoading(false);
+      });
 
-    return () => unsubscribe();
-  }, [authReady, user]);
+    return () => {
+      cancelled = true;
+    };
+  }, [authReady, user?.id, sessionToken, isOfflineMode]);
 
-  // Merge cloud notes + local drafts (dirty local draft overrides cloud view until saved or discarded)
   const notes = useMemo<CloudNotepadNote[]>(() => {
     const merged: Record<string, CloudNotepadNote> = { ...cloudNotesMap };
 
@@ -273,7 +239,6 @@ export function useCloudNotepad(options?: {
     });
   }, [cloudNotesMap, draftsMap]);
 
-  // Keep selectedNoteId valid
   useEffect(() => {
     if (notes.length === 0) {
       if (selectedNoteId) setSelectedNoteId('');
@@ -358,34 +323,6 @@ export function useCloudNotepad(options?: {
     [notes]
   );
 
-  const ensureUserParentDocument = useCallback(
-    async (uid: string, displayName: string, photoURL: string | null) => {
-      const userPath = `users/${uid}`;
-      const userRef = doc(db, 'users', uid);
-      try {
-        const snap = await getDoc(userRef);
-        if (!snap.exists()) {
-          const payload: Record<string, unknown> = {
-            uid,
-            displayName: (displayName || 'Pengguna Google').slice(0, 120),
-            preferredMode: engineMode,
-            preferredGeminiModel: geminiModel,
-            preferredLocalRuntime: 'builtin',
-            createdAt: serverTimestamp(),
-            updatedAt: serverTimestamp(),
-          };
-          if (photoURL) {
-            payload.photoUrl = photoURL.slice(0, 500);
-          }
-          await setDoc(userRef, payload);
-        }
-      } catch (err) {
-        handleFirestoreError(err, OperationType.WRITE, userPath);
-      }
-    },
-    [engineMode, geminiModel]
-  );
-
   const saveNoteToCloud = useCallback(
     async (noteId: string): Promise<boolean> => {
       const targetNote = notes.find((n) => n.id === noteId);
@@ -393,23 +330,19 @@ export function useCloudNotepad(options?: {
 
       if (isOfflineMode) {
         onNotify?.(
-          'Mode Offline aktif. Catatan disimpan sebagai draft lokal — aktifkan Mode Online untuk Simpan di Cloud.',
+          'Mode Offline aktif. Catatan disimpan sebagai draft lokal — aktifkan Mode Online untuk simpan ke Cloud.',
           'info'
         );
         return false;
       }
 
-      let currentUser = auth.currentUser;
-      if (!currentUser) {
-        const signedIn = await signInWithGoogle();
-        if (!signedIn || !auth.currentUser) {
-          onNotify?.(
-            'Catatan tetap aman sebagai draft lokal. Login Google diperlukan untuk menyimpan ke Cloud akun Anda.',
-            'info'
-          );
-          return false;
-        }
-        currentUser = auth.currentUser;
+      if (!user || !sessionToken) {
+        openAuthModal();
+        onNotify?.(
+          'Catatan aman sebagai draft lokal. Masuk akun TemaLoka untuk menyinkronkan ke Cloud.',
+          'info'
+        );
+        return false;
       }
 
       const safeId = /^[a-zA-Z0-9_-]{1,128}$/.test(targetNote.id)
@@ -426,41 +359,54 @@ export function useCloudNotepad(options?: {
       ).slice(0, MAX_NOTE_TEMPLATE_HINT_LENGTH);
 
       setSavingNoteIds((prev) => ({ ...prev, [noteId]: true }));
-      const noteDocPath = `users/${currentUser.uid}/notes/${safeId}`;
 
       try {
-        await ensureUserParentDocument(
-          currentUser.uid,
-          currentUser.displayName || currentUser.email || 'Pengguna Google',
-          currentUser.photoURL
-        );
-
-        const noteRef = doc(db, 'users', currentUser.uid, 'notes', safeId);
-        const existingCloud = await getDoc(noteRef);
-
-        if (existingCloud.exists()) {
-          await updateDoc(noteRef, {
+        const res = await fetch(`/api/notes/${encodeURIComponent(safeId)}`, {
+          method: 'PUT',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${sessionToken}`,
+          },
+          body: JSON.stringify({
             title: normalizedTitle,
             content: normalizedContent,
             tag: normalizedTag,
             pinned: Boolean(targetNote.pinned),
             templateHint: normalizedHint,
-            updatedAt: serverTimestamp(),
-          });
-        } else {
-          await setDoc(noteRef, {
-            uid: currentUser.uid,
-            title: normalizedTitle,
-            content: normalizedContent,
-            tag: normalizedTag,
-            pinned: Boolean(targetNote.pinned),
-            templateHint: normalizedHint,
-            createdAt: serverTimestamp(),
-            updatedAt: serverTimestamp(),
-          });
+          }),
+        });
+        const data = (await res.json()) as {
+          note?: {
+            id: string;
+            title: string;
+            content: string;
+            tag: string;
+            pinned: boolean;
+            templateHint: string;
+            createdAtMs: number;
+            updatedAtMs: number;
+          };
+          error?: string;
+        };
+        if (!res.ok || !data.note) {
+          throw new Error(data.error || 'Gagal menyimpan catatan ke Cloud.');
         }
 
-        // Remove dirty local override for this note on the active account (and clean guest copy if just logged in)
+        const savedNote: CloudNotepadNote = {
+          id: data.note.id,
+          title: data.note.title,
+          content: data.note.content,
+          tag: normalizeTag(data.note.tag),
+          pinned: data.note.pinned,
+          templateHint: data.note.templateHint,
+          createdAtMs: data.note.createdAtMs,
+          updatedAtMs: data.note.updatedAtMs,
+          cloudSyncedAtMs: data.note.updatedAtMs,
+          inCloud: true,
+          dirty: false,
+        };
+
+        setCloudNotesMap((prev) => ({ ...prev, [safeId]: savedNote }));
         setDraftsMap((prev) => {
           const next = { ...prev };
           delete next[noteId];
@@ -468,17 +414,9 @@ export function useCloudNotepad(options?: {
           return next;
         });
 
-        if (accountUid !== currentUser.uid) {
-          const guestDrafts = loadDraftsForAccount(null);
-          if (guestDrafts[noteId]) {
-            delete guestDrafts[noteId];
-            saveDraftsForAccount(null, guestDrafts);
-          }
-        }
-
         setSelectedNoteId(safeId);
         onNotify?.(
-          `Catatan "${normalizedTitle}" tersimpan di Cloud (${currentUser.email || currentUser.displayName || 'Akun Google'}).`,
+          `Catatan "${normalizedTitle}" tersimpan di Cloud (${user.email}).`,
           'success'
         );
         return true;
@@ -489,7 +427,7 @@ export function useCloudNotepad(options?: {
             : 'Gagal menyimpan catatan ke Cloud.',
           'error'
         );
-        handleFirestoreError(err, OperationType.WRITE, noteDocPath);
+        return false;
       } finally {
         setSavingNoteIds((prev) => {
           const next = { ...prev };
@@ -499,13 +437,13 @@ export function useCloudNotepad(options?: {
       }
     },
     [
-      accountUid,
       activeTemplateTitle,
-      ensureUserParentDocument,
       isOfflineMode,
       notes,
       onNotify,
-      signInWithGoogle,
+      openAuthModal,
+      sessionToken,
+      user,
     ]
   );
 
@@ -527,25 +465,27 @@ export function useCloudNotepad(options?: {
       const target = notes.find((n) => n.id === noteId);
       if (!target) return false;
 
-      if (target.inCloud && auth.currentUser) {
-        const noteDocPath = `users/${auth.currentUser.uid}/notes/${noteId}`;
+      if (target.inCloud && user && sessionToken) {
         setDeletingNoteIds((prev) => ({ ...prev, [noteId]: true }));
         try {
-          await deleteDoc(doc(db, 'users', auth.currentUser.uid, 'notes', noteId));
-        } catch (err) {
+          await fetch(`/api/notes/${encodeURIComponent(noteId)}`, {
+            method: 'DELETE',
+            headers: { Authorization: `Bearer ${sessionToken}` },
+          });
+          setCloudNotesMap((prev) => {
+            const next = { ...prev };
+            delete next[noteId];
+            return next;
+          });
+        } catch {
           onNotify?.('Gagal menghapus catatan dari Cloud.', 'error');
+        } finally {
           setDeletingNoteIds((prev) => {
             const next = { ...prev };
             delete next[noteId];
             return next;
           });
-          handleFirestoreError(err, OperationType.DELETE, noteDocPath);
         }
-        setDeletingNoteIds((prev) => {
-          const next = { ...prev };
-          delete next[noteId];
-          return next;
-        });
       }
 
       setDraftsMap((prev) => {
@@ -557,7 +497,7 @@ export function useCloudNotepad(options?: {
       onNotify?.(`Catatan "${target.title || 'Tanpa Judul'}" dihapus.`, 'info');
       return true;
     },
-    [notes, onNotify]
+    [notes, onNotify, sessionToken, user]
   );
 
   return {

@@ -140,7 +140,7 @@ export const CloudNotepadDrawer: React.FC<CloudNotepadDrawerProps> = ({
   isOfflineMode,
   onNotify,
 }) => {
-  const { user, isSigningIn, signInWithGoogle } = useAuthAndAi();
+  const { user, isSigningIn, openAuthModal } = useAuthAndAi();
   const [searchQuery, setSearchQuery] = useState('');
   const [tagFilter, setTagFilter] = useState<'all' | NoteTag>('all');
   const [sortBy, setSortBy] = useState<'updated-desc' | 'updated-asc' | 'title-asc'>(
@@ -363,8 +363,8 @@ export const CloudNotepadDrawer: React.FC<CloudNotepadDrawerProps> = ({
               </div>
               <p className="text-[11px] text-slate-500 truncate">
                 {user
-                  ? `Akun: ${user.email || user.displayName || 'Google'} · Tersimpan privat setelah klik Simpan di Cloud`
-                  : 'Mode Tamu (Draft Lokal) · Login Google untuk menyimpan ke Cloud akun Anda'}
+                  ? `Akun: ${user.email || user.displayName || 'TemaLoka'} · Tersimpan privat di Cloud`
+                  : 'Mode Tamu (Draft Lokal) · Masuk akun untuk menyimpan ke Cloud'}
               </p>
             </div>
           </div>
@@ -396,17 +396,17 @@ export const CloudNotepadDrawer: React.FC<CloudNotepadDrawerProps> = ({
             <div className="flex items-center gap-2 text-amber-950 min-w-0">
               <CloudOff className="w-4 h-4 text-amber-700 shrink-0" />
               <span className="leading-snug">
-                Catatan Anda tersimpan sementara di browser. Masuk akun Google agar bisa menekan <strong>Simpan di Cloud</strong> ke akun masing-masing.
+                Catatan Anda tersimpan sementara di browser. Masuk atau daftar akun agar bisa menekan <strong>Simpan di Cloud</strong> ke akun masing-masing.
               </span>
             </div>
             <button
               type="button"
               disabled={isSigningIn || isOfflineMode}
-              onClick={() => void signInWithGoogle()}
+              onClick={() => openAuthModal()}
               className="flex items-center gap-1.5 px-3 py-1.5 min-h-[36px] rounded-lg bg-slate-900 hover:bg-slate-800 disabled:opacity-50 text-white text-[11px] font-semibold cursor-pointer shrink-0"
             >
               <LogIn className="w-3.5 h-3.5" />
-              <span>{isSigningIn ? 'Menghubungkan...' : 'Masuk Google'}</span>
+              <span>{isSigningIn ? 'Menghubungkan...' : 'Masuk / Daftar Akun'}</span>
             </button>
           </div>
         )}
@@ -639,7 +639,7 @@ export const CloudNotepadDrawer: React.FC<CloudNotepadDrawerProps> = ({
                     Pilih atau Buat Catatan Baru
                   </h3>
                   <p className="text-xs text-slate-500 leading-relaxed">
-                    Simpan catatan CSS, snippet XML Blogger, parameter URL, atau daftar perbaikan Anda lalu tekan <strong>Simpan di Cloud</strong> untuk menyimpannya di akun Google pribadi Anda.
+                    Simpan catatan CSS, snippet XML Blogger, parameter URL, atau daftar perbaikan Anda lalu tekan <strong>Simpan di Cloud</strong> untuk menyimpannya di akun TemaLoka Anda.
                   </p>
                 </div>
                 <button
@@ -823,7 +823,7 @@ export const CloudNotepadDrawer: React.FC<CloudNotepadDrawerProps> = ({
                     onChange={(e) =>
                       updateDraftNote(activeNote.id, { content: e.target.value })
                     }
-                    placeholder="Tulis catatan template Blogger, CSS custom, script JS, parameter query URL, atau daftar tugas Anda di sini...&#10;&#10;Saat siap menyimpan ke akun Google pribadi Anda, klik tombol 'Simpan di Cloud' di bawah."
+                    placeholder="Tulis catatan template Blogger, CSS custom, script JS, parameter query URL, atau daftar tugas Anda di sini...&#10;&#10;Saat siap menyimpan ke akun Anda, klik tombol 'Simpan di Cloud' di bawah."
                     className="flex-1 w-full min-h-[220px] p-3.5 rounded-xl border border-slate-200 bg-slate-50/50 text-sm sm:text-xs font-mono leading-relaxed text-slate-900 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-600/20 focus:border-blue-600 focus:bg-white resize-none"
                   />
                   <div className="pt-2 flex flex-wrap items-center justify-between gap-2 text-[11px] text-slate-500 font-mono tabular-nums">
@@ -883,7 +883,7 @@ export const CloudNotepadDrawer: React.FC<CloudNotepadDrawerProps> = ({
                     ) : !user ? (
                       <>
                         <CloudUpload className="w-4 h-4" />
-                        <span>Masuk Google &amp; Simpan di Cloud</span>
+                        <span>Masuk Akun &amp; Simpan di Cloud</span>
                       </>
                     ) : !activeNote.dirty && activeNote.inCloud ? (
                       <>

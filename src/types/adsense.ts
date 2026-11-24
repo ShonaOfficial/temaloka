@@ -1,4 +1,4 @@
-export const ADMIN_BOOTSTRAP_EMAIL = 'mehmet.azmir@gmail.com';
+export const ADMIN_BOOTSTRAP_EMAIL = 'shonatujuhbelasofficial@gmail.com';
 
 export type TopBannerFormat = 'auto' | 'horizontal' | 'rectangle';
 export type SidebarSlotFormat = 'auto' | 'vertical' | 'rectangle';

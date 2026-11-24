@@ -172,7 +172,7 @@ export const OnlineOfflineToggle: React.FC<OnlineOfflineToggleProps> = ({ onNoti
             : 'Halaman Online (Kunjungan aktif) — Klik untuk beralih ke Mode Offline'
       }
       aria-label={isOfflineMode ? 'Matikan Mode Offline, beralih ke Online' : 'Aktifkan Mode Offline'}
-      className={`flex items-center gap-2 px-2.5 py-1.5 text-xs font-medium rounded-lg border transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+      className={`flex items-center gap-1 sm:gap-2 px-2 sm:px-2.5 py-1.5 min-h-[36px] sm:min-h-[34px] text-[11px] sm:text-xs font-semibold rounded-lg border transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
         isOfflineMode
           ? 'border-amber-300 bg-amber-50 text-amber-900 hover:bg-amber-100'
           : 'border-emerald-200 bg-emerald-50/70 text-emerald-900 hover:bg-emerald-100/70'
@@ -189,13 +189,13 @@ export const OnlineOfflineToggle: React.FC<OnlineOfflineToggleProps> = ({ onNoti
       {/* Visual Toggle Switch Track */}
       <span
         aria-hidden="true"
-        className={`relative inline-flex h-4 w-7 shrink-0 items-center rounded-full transition-colors ${
+        className={`relative inline-flex h-4 w-6 sm:w-7 shrink-0 items-center rounded-full transition-colors ${
           isOfflineMode ? 'bg-amber-600' : 'bg-emerald-600/30'
         }`}
       >
         <span
           className={`inline-block h-3 w-3 transform rounded-full bg-white shadow-xs transition-transform ${
-            isOfflineMode ? 'translate-x-3.5' : 'translate-x-0.5'
+            isOfflineMode ? 'translate-x-2.5 sm:translate-x-3.5' : 'translate-x-0.5'
           }`}
         />
       </span>

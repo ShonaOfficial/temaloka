@@ -177,11 +177,20 @@ export const SidebarControls: React.FC<SidebarControlsProps> = ({
     user,
     engineMode,
     geminiModel,
-    signInWithGoogle,
+    freellmModel,
+    freellmStatus,
+    openAuthModal,
     authorizedGeminiFetch,
     setChatOpen,
   } = useAuthAndAi();
   const activeGeminiMeta = getGeminiModelOption(geminiModel);
+  const needsServerAuth =
+    (engineMode === 'gemini' && !user) ||
+    (engineMode === 'freellm' && !freellmStatus.allowForGuests && !user);
+  const activeCloudLabel =
+    engineMode === 'freellm'
+      ? `FreeLLM (${freellmModel})`
+      : activeGeminiMeta.shortLabel;
   const [aiThemePrompt, setAiThemePrompt] = useState('');
   const [isGeneratingTheme, setIsGeneratingTheme] = useState(false);
   const [aiThemeFeedback, setAiThemeFeedback] = useState<string | null>(null);
@@ -430,10 +439,15 @@ export const SidebarControls: React.FC<SidebarControlsProps> = ({
       return;
     }
 
-    if (!user) {
+    if (needsServerAuth) {
       setIsGeneratingTheme(false);
-      onNotify('Login Google diperlukan untuk memakai Gemini Cloud.', 'info');
-      void signInWithGoogle();
+      onNotify(
+        engineMode === 'freellm'
+          ? 'Masuk akun diperlukan untuk memakai FreeLLMAPI.'
+          : 'Masuk akun diperlukan untuk memakai Gemini Cloud.',
+        'info'
+      );
+      openAuthModal();
       return;
     }
 
@@ -496,10 +510,15 @@ export const SidebarControls: React.FC<SidebarControlsProps> = ({
       return;
     }
 
-    if (!user) {
+    if (needsServerAuth) {
       setIsGeneratingCss(false);
-      onNotify('Login Google diperlukan untuk memakai Gemini Cloud.', 'info');
-      void signInWithGoogle();
+      onNotify(
+        engineMode === 'freellm'
+          ? 'Masuk akun diperlukan untuk memakai FreeLLMAPI.'
+          : 'Masuk akun diperlukan untuk memakai Gemini Cloud.',
+        'info'
+      );
+      openAuthModal();
       return;
     }
 
@@ -517,7 +536,7 @@ export const SidebarControls: React.FC<SidebarControlsProps> = ({
         onCustomCssChange(data.css.trim());
       }
       setAiCssFeedback(data.explanation || 'CSS berhasil diperbarui.');
-      onNotify(`Modifikasi CSS (${activeGeminiMeta.shortLabel}) diterapkan real-time.`, 'success');
+      onNotify(`Modifikasi CSS (${activeCloudLabel}) diterapkan real-time.`, 'success');
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Gagal menghubungi Gemini.';
       const fallbackCss = generateCustomCssOfflineAi(aiCssPrompt.trim(), customCss);
@@ -618,10 +637,15 @@ export const SidebarControls: React.FC<SidebarControlsProps> = ({
       return;
     }
 
-    if (!user) {
+    if (needsServerAuth) {
       setIsGeneratingContent(false);
-      onNotify('Login Google diperlukan untuk memakai Gemini Cloud.', 'info');
-      void signInWithGoogle();
+      onNotify(
+        engineMode === 'freellm'
+          ? 'Masuk akun diperlukan untuk memakai FreeLLMAPI.'
+          : 'Masuk akun diperlukan untuk memakai Gemini Cloud.',
+        'info'
+      );
+      openAuthModal();
       return;
     }
 
@@ -675,10 +699,15 @@ export const SidebarControls: React.FC<SidebarControlsProps> = ({
       return;
     }
 
-    if (!user) {
+    if (needsServerAuth) {
       setIsDiagnosing(false);
-      onNotify('Login Google diperlukan untuk memakai Gemini Cloud.', 'info');
-      void signInWithGoogle();
+      onNotify(
+        engineMode === 'freellm'
+          ? 'Masuk akun diperlukan untuk memakai FreeLLMAPI.'
+          : 'Masuk akun diperlukan untuk memakai Gemini Cloud.',
+        'info'
+      );
+      openAuthModal();
       return;
     }
 
@@ -1762,7 +1791,7 @@ export const SidebarControls: React.FC<SidebarControlsProps> = ({
                 <span className="text-[11px] text-slate-500">
                   {appOfflineMode || engineMode === 'local'
                     ? `${offlineAi.activeMeta.shortName} · 0 Kuota`
-                    : `${activeGeminiMeta.shortLabel}`}
+                    : activeCloudLabel}
                 </span>
               </div>
               <p className="text-[11px] text-slate-500 leading-relaxed">

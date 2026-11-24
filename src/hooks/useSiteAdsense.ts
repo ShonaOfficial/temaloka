@@ -1,106 +1,55 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useAuthAndAi } from '../contexts/AuthAndAiContext';
 import {
-  collection,
-  deleteDoc,
-  doc,
-  getDoc,
-  onSnapshot,
-  query,
-  serverTimestamp,
-  setDoc,
-  updateDoc,
-  where,
-  type Timestamp,
-} from 'firebase/firestore';
-import type { User } from 'firebase/auth';
-import { db, handleFirestoreError, OperationType } from '../lib/firebase';
-import {
-  ADMIN_BOOTSTRAP_EMAIL,
-  ADSENSE_FIELD_LIMITS,
   DEFAULT_SITE_ADSENSE_CONFIG,
   sanitizePublisherId,
-  sanitizeSlotDigits,
-  type AdminUserRecord,
   type AdsenseUnitFormatType,
   type AdsenseUnitPlacementType,
   type AdsenseUnitRecord,
-  type FooterSlotFormat,
-  type ModalSlotFormat,
-  type SidebarSlotFormat,
   type SiteAdsenseConfig,
-  type TopBannerFormat,
 } from '../types/adsense';
+import {
+  DEFAULT_PAYMENT_SETTINGS,
+  DEFAULT_SITE_SEO_CONFIG,
+  type AuthUserSession,
+  type DbStorageMode,
+  type FreeLlmPublicStatus,
+  type GoogleCloudPublicStatus,
+  type PaymentSettingsConfig,
+  type PublicSiteConfigResponse,
+  type SiteSeoConfig,
+} from '../types/admin';
+import {
+  DEFAULT_PREMIUM_CONFIG,
+  hasFreeAdsPrivilege,
+  type PremiumSettingsConfig,
+} from '../lib/featureRegistry';
 
-const APP_CONFIG_COLLECTION = 'appConfig';
-const ADSENSE_DOC_ID = 'adsense';
-const UNITS_COLLECTION = 'adsenseUnits';
-const ADMINS_COLLECTION = 'admins';
 const MANAGED_HEAD_ATTR = 'data-temaloka-managed-adsense';
-
-function toMillis(ts: unknown): number {
-  if (!ts) return 0;
-  if (typeof (ts as Timestamp).toMillis === 'function') {
-    return (ts as Timestamp).toMillis();
-  }
-  return 0;
-}
-
-function asBannerFormat(v: unknown): TopBannerFormat {
-  return v === 'auto' || v === 'horizontal' || v === 'rectangle' ? v : 'horizontal';
-}
-
-function asSidebarFormat(v: unknown): SidebarSlotFormat {
-  return v === 'auto' || v === 'vertical' || v === 'rectangle' ? v : 'rectangle';
-}
-
-function asFooterFormat(v: unknown): FooterSlotFormat {
-  return v === 'auto' || v === 'horizontal' || v === 'rectangle' ? v : 'auto';
-}
-
-function asModalFormat(v: unknown): ModalSlotFormat {
-  return v === 'auto' || v === 'rectangle' ? v : 'rectangle';
-}
-
-function asUnitFormat(v: unknown): AdsenseUnitFormatType {
-  return v === 'leaderboard' ||
-    v === 'sidebar' ||
-    v === 'in-article' ||
-    v === 'multiplex' ||
-    v === 'responsive'
-    ? v
-    : 'responsive';
-}
-
-function asUnitPlacement(v: unknown): AdsenseUnitPlacementType {
-  return v === 'topBanner' ||
-    v === 'sidebarSlot' ||
-    v === 'footerSlot' ||
-    v === 'modalSlot' ||
-    v === 'bloggerTemplate'
-    ? v
-    : 'bloggerTemplate';
-}
-
-function makeUnitDocId(): string {
-  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
-    return `ad_${crypto.randomUUID().replace(/-/g, '').slice(0, 20)}`;
-  }
-  return `ad_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
-}
+const MANAGED_SEO_ATTR = 'data-temaloka-managed-seo';
 
 export interface SiteAdsenseController {
   config: SiteAdsenseConfig;
+  seoConfig: SiteSeoConfig;
+  premiumConfig: PremiumSettingsConfig;
+  paymentConfig: PaymentSettingsConfig;
+  freellmPublic: FreeLlmPublicStatus;
+  gcloudPublic: GoogleCloudPublicStatus;
+  dbMode: DbStorageMode;
   configExistsInCloud: boolean;
   loadingConfig: boolean;
   savingConfig: boolean;
   units: AdsenseUnitRecord[];
   loadingUnits: boolean;
-  admins: AdminUserRecord[];
   isBootstrappedAdmin: boolean;
   isAdmin: boolean;
   checkingAdmin: boolean;
   shouldRenderLiveAds: boolean;
+  refreshPublicConfig: () => Promise<void>;
   saveGlobalConfig: (next: SiteAdsenseConfig) => Promise<void>;
+  saveSeoConfig: (next: SiteSeoConfig) => Promise<void>;
+  savePremiumConfig: (next: PremiumSettingsConfig) => Promise<void>;
+  savePaymentConfig: (next: PaymentSettingsConfig) => Promise<void>;
   createAdUnit: (input: {
     name: string;
     slotId: string;
@@ -123,206 +72,138 @@ export interface SiteAdsenseController {
     }
   ) => Promise<void>;
   deleteAdUnit: (unitId: string) => Promise<void>;
-  addAdminUser: (uid: string, email: string, label: string) => Promise<void>;
-  removeAdminUser: (uid: string) => Promise<void>;
+}
+
+function upsertManagedMeta(
+  head: HTMLHeadElement,
+  keyAttr: 'name' | 'property',
+  keyVal: string,
+  content: string,
+  tagId: string
+) {
+  const existing = head.querySelector(`meta[${MANAGED_SEO_ATTR}="${tagId}"]`);
+  if (!content.trim()) {
+    existing?.remove();
+    return;
+  }
+  if (existing) {
+    if (existing.getAttribute('content') !== content.trim()) {
+      existing.setAttribute('content', content.trim());
+    }
+  } else {
+    const el = document.createElement('meta');
+    el.setAttribute(keyAttr, keyVal);
+    el.setAttribute('content', content.trim());
+    el.setAttribute(MANAGED_SEO_ATTR, tagId);
+    head.appendChild(el);
+  }
 }
 
 export function useSiteAdsense(
-  user: User | null,
+  user: AuthUserSession | null,
   authReady: boolean,
   isOfflineMode: boolean
 ): SiteAdsenseController {
+  const { sessionToken, setFreeLlmStatus } = useAuthAndAi();
+
+  const [dbMode, setDbMode] = useState<DbStorageMode>('local-sqlite');
   const [config, setConfig] = useState<SiteAdsenseConfig>(DEFAULT_SITE_ADSENSE_CONFIG);
+  const [seoConfig, setSeoConfig] = useState<SiteSeoConfig>(DEFAULT_SITE_SEO_CONFIG);
+  const [premiumConfig, setPremiumConfig] = useState<PremiumSettingsConfig>(DEFAULT_PREMIUM_CONFIG);
+  const [paymentConfig, setPaymentConfig] = useState<PaymentSettingsConfig>(DEFAULT_PAYMENT_SETTINGS);
+  const [freellmPublic, setFreellmPublic] = useState<FreeLlmPublicStatus>({
+    enabled: true,
+    defaultModel: 'auto',
+    routingStrategy: 'auto',
+    allowForGuests: true,
+    configuredProviders: [],
+  });
+  const [gcloudPublic, setGcloudPublic] = useState<GoogleCloudPublicStatus>({
+    enabled: false,
+    projectId: '',
+    oauthEnabled: false,
+    oauthClientId: '',
+    hasGeminiApiKey: false,
+    hasIndexingServiceAccount: false,
+    serviceAccountEmail: '',
+  });
   const [configExistsInCloud, setConfigExistsInCloud] = useState(false);
   const [loadingConfig, setLoadingConfig] = useState(true);
   const [savingConfig, setSavingConfig] = useState(false);
 
   const [units, setUnits] = useState<AdsenseUnitRecord[]>([]);
   const [loadingUnits, setLoadingUnits] = useState(true);
-  const [admins, setAdmins] = useState<AdminUserRecord[]>([]);
 
-  const [isExtraAdmin, setIsExtraAdmin] = useState(false);
-  const [checkingAdmin, setCheckingAdmin] = useState(false);
+  const isAdmin = Boolean(user && user.role === 'admin');
+  const isBootstrappedAdmin = isAdmin;
 
-  const isBootstrappedAdmin = useMemo(() => {
-    if (!user || !user.emailVerified) return false;
-    return (user.email || '').toLowerCase() === ADMIN_BOOTSTRAP_EMAIL;
-  }, [user]);
+  const refreshPublicConfig = useCallback(async () => {
+    try {
+      const headers: Record<string, string> = {};
+      if (sessionToken) {
+        headers.Authorization = `Bearer ${sessionToken}`;
+      }
+      const res = await fetch('/api/config/public', { headers });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = (await res.json()) as PublicSiteConfigResponse;
+      setDbMode(data.dbMode || 'local-sqlite');
+      if (data.adsense) {
+        setConfig(data.adsense);
+        setConfigExistsInCloud(Boolean(data.adsense.updatedAtMs || data.adsense.publisherId));
+      }
+      if (Array.isArray(data.units)) {
+        setUnits(data.units);
+      }
+      if (data.seo) {
+        setSeoConfig(data.seo);
+      }
+      if (data.premium) {
+        setPremiumConfig(data.premium);
+      }
+      if (data.payment) {
+        setPaymentConfig(data.payment);
+      }
+      if (data.freellm) {
+        setFreellmPublic(data.freellm);
+        setFreeLlmStatus(data.freellm);
+      }
+      if (data.gcloud) {
+        setGcloudPublic(data.gcloud);
+      }
+    } catch {
+      // Keep current state cleanly if offline
+    } finally {
+      setLoadingConfig(false);
+      setLoadingUnits(false);
+    }
+  }, [sessionToken, setFreeLlmStatus]);
 
   useEffect(() => {
     if (!authReady) return;
-    if (!user || !user.emailVerified) {
-      setIsExtraAdmin(false);
-      setCheckingAdmin(false);
-      return;
-    }
-    if (isBootstrappedAdmin) {
-      setIsExtraAdmin(true);
-      setCheckingAdmin(false);
-      return;
-    }
-
-    let cancelled = false;
-    setCheckingAdmin(true);
-    const adminRef = doc(db, ADMINS_COLLECTION, user.uid);
-    getDoc(adminRef)
-      .then((snap) => {
-        if (!cancelled) {
-          setIsExtraAdmin(snap.exists());
-          setCheckingAdmin(false);
-        }
-      })
-      .catch((error) => {
-        // Non-admin read denial should cleanly fall back to false; log unexpected errors via handler helper pattern
-        if (!cancelled) {
-          setIsExtraAdmin(false);
-          setCheckingAdmin(false);
-        }
-        const msg = error instanceof Error ? error.message : String(error);
-        if (!/permission|insufficient/i.test(msg)) {
-          console.warn('Admin check warning:', msg);
-        }
-      });
-
-    return () => {
-      cancelled = true;
-    };
-  }, [authReady, user, isBootstrappedAdmin]);
-
-  const isAdmin = isBootstrappedAdmin || isExtraAdmin;
-
-  // Subscribe to public /appConfig/adsense doc
-  useEffect(() => {
-    const configPath = `${APP_CONFIG_COLLECTION}/${ADSENSE_DOC_ID}`;
-    const configRef = doc(db, APP_CONFIG_COLLECTION, ADSENSE_DOC_ID);
-    const unsub = onSnapshot(
-      configRef,
-      (snap) => {
-        setLoadingConfig(false);
-        if (!snap.exists()) {
-          setConfigExistsInCloud(false);
-          setConfig(DEFAULT_SITE_ADSENSE_CONFIG);
-          return;
-        }
-        const d = snap.data() as Record<string, unknown>;
-        setConfigExistsInCloud(true);
-        setConfig({
-          adsenseEnabled: Boolean(d.adsenseEnabled),
-          publisherId: typeof d.publisherId === 'string' ? d.publisherId : '',
-          autoAdsEnabled: Boolean(d.autoAdsEnabled),
-          headMetaEnabled: Boolean(d.headMetaEnabled),
-          adsTxtContent: typeof d.adsTxtContent === 'string' ? d.adsTxtContent : '',
-          hideAdsForAdmin: d.hideAdsForAdmin !== false,
-          hideAdsInOfflineMode: d.hideAdsInOfflineMode !== false,
-          testMode: Boolean(d.testMode),
-          defaultTemplatePubId:
-            typeof d.defaultTemplatePubId === 'string' ? d.defaultTemplatePubId : '',
-          topBannerEnabled: Boolean(d.topBannerEnabled),
-          topBannerSlot: typeof d.topBannerSlot === 'string' ? d.topBannerSlot : '',
-          topBannerFormat: asBannerFormat(d.topBannerFormat),
-          sidebarSlotEnabled: Boolean(d.sidebarSlotEnabled),
-          sidebarSlotId: typeof d.sidebarSlotId === 'string' ? d.sidebarSlotId : '',
-          sidebarSlotFormat: asSidebarFormat(d.sidebarSlotFormat),
-          footerSlotEnabled: Boolean(d.footerSlotEnabled),
-          footerSlotId: typeof d.footerSlotId === 'string' ? d.footerSlotId : '',
-          footerSlotFormat: asFooterFormat(d.footerSlotFormat),
-          modalSlotEnabled: Boolean(d.modalSlotEnabled),
-          modalSlotId: typeof d.modalSlotId === 'string' ? d.modalSlotId : '',
-          modalSlotFormat: asModalFormat(d.modalSlotFormat),
-          adminNote: typeof d.adminNote === 'string' ? d.adminNote : '',
-          updatedByUid: typeof d.updatedByUid === 'string' ? d.updatedByUid : '',
-          updatedByEmail: typeof d.updatedByEmail === 'string' ? d.updatedByEmail : '',
-          updatedAtMs: toMillis(d.updatedAt),
-        });
-      },
-      (error) => {
-        setLoadingConfig(false);
-        handleFirestoreError(error, OperationType.GET, configPath);
-      }
-    );
-    return () => unsub();
-  }, []);
-
-  // Subscribe to custom Ad Units (all units for bootstrapped admin, enabled units for visitors)
-  useEffect(() => {
-    if (!authReady) return;
-    setLoadingUnits(true);
-    const q = isBootstrappedAdmin
-      ? query(collection(db, UNITS_COLLECTION))
-      : query(collection(db, UNITS_COLLECTION), where('enabled', '==', true));
-
-    const unsub = onSnapshot(
-      q,
-      (snap) => {
-        const list: AdsenseUnitRecord[] = snap.docs.map((docSnap) => {
-          const d = docSnap.data() as Record<string, unknown>;
-          return {
-            id: docSnap.id,
-            name: typeof d.name === 'string' ? d.name : docSnap.id,
-            slotId: typeof d.slotId === 'string' ? d.slotId : '',
-            format: asUnitFormat(d.format),
-            placement: asUnitPlacement(d.placement),
-            enabled: Boolean(d.enabled),
-            onlyOnPosts: Boolean(d.onlyOnPosts),
-            notes: typeof d.notes === 'string' ? d.notes : '',
-            createdByUid: typeof d.createdByUid === 'string' ? d.createdByUid : '',
-            createdAtMs: toMillis(d.createdAt),
-            updatedAtMs: toMillis(d.updatedAt),
-          };
-        });
-        list.sort((a, b) => b.updatedAtMs - a.updatedAtMs || a.name.localeCompare(b.name));
-        setUnits(list);
-        setLoadingUnits(false);
-      },
-      (error) => {
-        setLoadingUnits(false);
-        handleFirestoreError(error, OperationType.LIST, UNITS_COLLECTION);
-      }
-    );
-
-    return () => unsub();
-  }, [authReady, isBootstrappedAdmin]);
-
-  // Subscribe to additional Admin list (bootstrapped admin only)
-  useEffect(() => {
-    if (!authReady || !isBootstrappedAdmin) {
-      setAdmins([]);
-      return;
-    }
-
-    const unsub = onSnapshot(
-      collection(db, ADMINS_COLLECTION),
-      (snap) => {
-        const rows: AdminUserRecord[] = snap.docs.map((docSnap) => {
-          const d = docSnap.data() as Record<string, unknown>;
-          return {
-            uid: typeof d.uid === 'string' ? d.uid : docSnap.id,
-            email: typeof d.email === 'string' ? d.email : '',
-            label: typeof d.label === 'string' ? d.label : '',
-            addedByUid: typeof d.addedByUid === 'string' ? d.addedByUid : '',
-            createdAtMs: toMillis(d.createdAt),
-          };
-        });
-        rows.sort((a, b) => b.createdAtMs - a.createdAtMs);
-        setAdmins(rows);
-      },
-      (error) => {
-        handleFirestoreError(error, OperationType.LIST, ADMINS_COLLECTION);
-      }
-    );
-
-    return () => unsub();
-  }, [authReady, isBootstrappedAdmin]);
+    void refreshPublicConfig();
+  }, [authReady, sessionToken, isAdmin, refreshPublicConfig]);
 
   const shouldRenderLiveAds = useMemo(() => {
     if (!config.adsenseEnabled) return false;
     if (!sanitizePublisherId(config.publisherId)) return false;
     if (config.hideAdsInOfflineMode && isOfflineMode) return false;
     if (config.hideAdsForAdmin && isAdmin) return false;
+    if (
+      !isAdmin &&
+      hasFreeAdsPrivilege(
+        premiumConfig,
+        user?.tier || 'free',
+        false,
+        user?.featureOverrides,
+        user?.proPlanId
+      )
+    ) {
+      return false;
+    }
     return true;
-  }, [config, isOfflineMode, isAdmin]);
+  }, [config, isOfflineMode, isAdmin, premiumConfig, user]);
 
-  // Dynamically manage <meta name="google-adsense-account"> & Auto Ads <script> in document.head
+  // Dynamically manage <meta name="google-adsense-account"> & Auto Ads <script>
   useEffect(() => {
     if (typeof document === 'undefined') return;
     const head = document.head;
@@ -377,63 +258,188 @@ export function useSiteAdsense(
     }
   }, [config.adsenseEnabled, config.headMetaEnabled, config.autoAdsEnabled, config.publisherId, shouldRenderLiveAds]);
 
+  // Dynamically apply Admin Web SEO config to document.head
+  useEffect(() => {
+    if (typeof document === 'undefined' || !seoConfig.seoEnabled) return;
+    const head = document.head;
+    if (!head) return;
+
+    if (seoConfig.siteTitle.trim()) {
+      document.title = seoConfig.siteTitle.trim();
+      upsertManagedMeta(head, 'property', 'og:title', seoConfig.siteTitle, 'og-title');
+    }
+    upsertManagedMeta(head, 'name', 'description', seoConfig.metaDescription, 'meta-desc');
+    upsertManagedMeta(head, 'property', 'og:description', seoConfig.metaDescription, 'og-desc');
+    upsertManagedMeta(head, 'name', 'keywords', seoConfig.metaKeywords, 'meta-keywords');
+    upsertManagedMeta(head, 'property', 'og:image', seoConfig.ogImageUrl, 'og-image');
+    upsertManagedMeta(head, 'name', 'google-site-verification', seoConfig.googleSiteVerification, 'gsc');
+    upsertManagedMeta(head, 'name', 'msvalidate.01', seoConfig.bingSiteVerification, 'bing');
+    upsertManagedMeta(head, 'name', 'yandex-verification', seoConfig.yandexVerification, 'yandex');
+
+    const existingCanon = head.querySelector(`link[${MANAGED_SEO_ATTR}="canonical"]`);
+    if (seoConfig.canonicalOrigin.trim()) {
+      if (existingCanon) {
+        existingCanon.setAttribute('href', seoConfig.canonicalOrigin.trim());
+      } else {
+        const link = document.createElement('link');
+        link.rel = 'canonical';
+        link.href = seoConfig.canonicalOrigin.trim();
+        link.setAttribute(MANAGED_SEO_ATTR, 'canonical');
+        head.appendChild(link);
+      }
+    } else {
+      existingCanon?.remove();
+    }
+
+    const existingSchema = head.querySelector(`script[${MANAGED_SEO_ATTR}="schema"]`);
+    if (seoConfig.schemaOrgEnabled) {
+      const schemaPayload = JSON.stringify({
+        '@context': 'https://schema.org',
+        '@type': 'WebApplication',
+        name: seoConfig.schemaOrgName || seoConfig.siteTitle,
+        description: seoConfig.metaDescription,
+        applicationCategory: 'DeveloperApplication',
+        operatingSystem: 'All',
+        ...(seoConfig.canonicalOrigin ? { url: seoConfig.canonicalOrigin } : {}),
+      });
+      if (existingSchema) {
+        if (existingSchema.textContent !== schemaPayload) {
+          existingSchema.textContent = schemaPayload;
+        }
+      } else {
+        const s = document.createElement('script');
+        s.type = 'application/ld+json';
+        s.setAttribute(MANAGED_SEO_ATTR, 'schema');
+        s.textContent = schemaPayload;
+        head.appendChild(s);
+      }
+    } else {
+      existingSchema?.remove();
+    }
+
+    const existingGa = head.querySelector(`script[${MANAGED_SEO_ATTR}="ga-src"]`);
+    const cleanGa = seoConfig.gaMeasurementId.trim();
+    if (/^G-[A-Z0-9]{4,20}$/i.test(cleanGa) && !isOfflineMode) {
+      const gaSrc = `https://www.googletagmanager.com/gtag/js?id=${encodeURIComponent(cleanGa)}`;
+      if (!existingGa || existingGa.getAttribute('src') !== gaSrc) {
+        existingGa?.remove();
+        const gaScript = document.createElement('script');
+        gaScript.async = true;
+        gaScript.src = gaSrc;
+        gaScript.setAttribute(MANAGED_SEO_ATTR, 'ga-src');
+        head.appendChild(gaScript);
+      }
+    } else {
+      existingGa?.remove();
+    }
+  }, [seoConfig, isOfflineMode]);
+
+  const requireToken = useCallback(() => {
+    if (!sessionToken || !isAdmin) {
+      throw new Error('Silakan masuk sebagai Admin di Panel Admin terlebih dahulu.');
+    }
+    return sessionToken;
+  }, [sessionToken, isAdmin]);
+
   const saveGlobalConfig = useCallback(
     async (next: SiteAdsenseConfig) => {
-      if (!user || !user.emailVerified || !isAdmin) {
-        throw new Error('Hanya akun Admin terverifikasi yang dapat menyimpan pengaturan AdSense.');
-      }
-
-      const rawPub = next.publisherId.trim();
-      const sanitizedPub = rawPub ? sanitizePublisherId(rawPub) : '';
-      if (rawPub && !sanitizedPub) {
-        throw new Error('Format Publisher ID tidak valid. Gunakan format ca-pub-1234567890123456.');
-      }
-
-      const rawTplPub = next.defaultTemplatePubId.trim();
-      const sanitizedTplPub = rawTplPub ? sanitizePublisherId(rawTplPub) : '';
-      if (rawTplPub && !sanitizedTplPub) {
-        throw new Error('Format Publisher ID default template tidak valid.');
-      }
-
-      const payload = {
-        adsenseEnabled: Boolean(next.adsenseEnabled),
-        publisherId: sanitizedPub,
-        autoAdsEnabled: Boolean(next.autoAdsEnabled),
-        headMetaEnabled: Boolean(next.headMetaEnabled),
-        adsTxtContent: next.adsTxtContent.slice(0, ADSENSE_FIELD_LIMITS.adsTxtMax),
-        hideAdsForAdmin: Boolean(next.hideAdsForAdmin),
-        hideAdsInOfflineMode: Boolean(next.hideAdsInOfflineMode),
-        testMode: Boolean(next.testMode),
-        defaultTemplatePubId: sanitizedTplPub || sanitizedPub,
-        topBannerEnabled: Boolean(next.topBannerEnabled),
-        topBannerSlot: sanitizeSlotDigits(next.topBannerSlot),
-        topBannerFormat: asBannerFormat(next.topBannerFormat),
-        sidebarSlotEnabled: Boolean(next.sidebarSlotEnabled),
-        sidebarSlotId: sanitizeSlotDigits(next.sidebarSlotId),
-        sidebarSlotFormat: asSidebarFormat(next.sidebarSlotFormat),
-        footerSlotEnabled: Boolean(next.footerSlotEnabled),
-        footerSlotId: sanitizeSlotDigits(next.footerSlotId),
-        footerSlotFormat: asFooterFormat(next.footerSlotFormat),
-        modalSlotEnabled: Boolean(next.modalSlotEnabled),
-        modalSlotId: sanitizeSlotDigits(next.modalSlotId),
-        modalSlotFormat: asModalFormat(next.modalSlotFormat),
-        adminNote: next.adminNote.slice(0, ADSENSE_FIELD_LIMITS.adminNoteMax),
-        updatedByUid: user.uid,
-        updatedByEmail: (user.email || ADMIN_BOOTSTRAP_EMAIL).slice(0, ADSENSE_FIELD_LIMITS.adminEmailMax),
-        updatedAt: serverTimestamp(),
-      };
-
-      const docPath = `${APP_CONFIG_COLLECTION}/${ADSENSE_DOC_ID}`;
+      const token = requireToken();
       setSavingConfig(true);
       try {
-        await setDoc(doc(db, APP_CONFIG_COLLECTION, ADSENSE_DOC_ID), payload);
-      } catch (error) {
-        handleFirestoreError(error, OperationType.WRITE, docPath);
+        const res = await fetch('/api/admin/adsense/config', {
+          method: 'PUT',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${token}`,
+          },
+          body: JSON.stringify(next),
+        });
+        const data = (await res.json()) as { config?: SiteAdsenseConfig; error?: string };
+        if (!res.ok || !data.config) {
+          throw new Error(data.error || 'Gagal menyimpan pengaturan AdSense.');
+        }
+        setConfig(data.config);
+        setConfigExistsInCloud(true);
       } finally {
         setSavingConfig(false);
       }
     },
-    [user, isAdmin]
+    [requireToken]
+  );
+
+  const saveSeoConfig = useCallback(
+    async (next: SiteSeoConfig) => {
+      const token = requireToken();
+      setSavingConfig(true);
+      try {
+        const res = await fetch('/api/admin/seo', {
+          method: 'PUT',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${token}`,
+          },
+          body: JSON.stringify(next),
+        });
+        const data = (await res.json()) as { seo?: SiteSeoConfig; error?: string };
+        if (!res.ok || !data.seo) {
+          throw new Error(data.error || 'Gagal menyimpan pengaturan SEO.');
+        }
+        setSeoConfig(data.seo);
+      } finally {
+        setSavingConfig(false);
+      }
+    },
+    [requireToken]
+  );
+
+  const savePremiumConfig = useCallback(
+    async (next: PremiumSettingsConfig) => {
+      const token = requireToken();
+      setSavingConfig(true);
+      try {
+        const res = await fetch('/api/admin/premium', {
+          method: 'PUT',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${token}`,
+          },
+          body: JSON.stringify(next),
+        });
+        const data = (await res.json()) as { premium?: PremiumSettingsConfig; error?: string };
+        if (!res.ok || !data.premium) {
+          throw new Error(data.error || 'Gagal menyimpan pengaturan Fitur Premium.');
+        }
+        setPremiumConfig(data.premium);
+      } finally {
+        setSavingConfig(false);
+      }
+    },
+    [requireToken]
+  );
+
+  const savePaymentConfig = useCallback(
+    async (next: PaymentSettingsConfig) => {
+      const token = requireToken();
+      setSavingConfig(true);
+      try {
+        const res = await fetch('/api/admin/payment', {
+          method: 'PUT',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${token}`,
+          },
+          body: JSON.stringify(next),
+        });
+        const data = (await res.json()) as { payment?: PaymentSettingsConfig; error?: string };
+        if (!res.ok || !data.payment) {
+          throw new Error(data.error || 'Gagal menyimpan pengaturan Pembayaran Manual.');
+        }
+        setPaymentConfig(data.payment);
+      } finally {
+        setSavingConfig(false);
+      }
+    },
+    [requireToken]
   );
 
   const createAdUnit = useCallback(
@@ -446,33 +452,22 @@ export function useSiteAdsense(
       onlyOnPosts: boolean;
       notes: string;
     }) => {
-      if (!user || !user.emailVerified || !isAdmin) {
-        throw new Error('Hanya Admin yang dapat membuat unit iklan.');
+      const token = requireToken();
+      const res = await fetch('/api/admin/adsense/units', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify(input),
+      });
+      const data = (await res.json()) as { units?: AdsenseUnitRecord[]; error?: string };
+      if (!res.ok || !data.units) {
+        throw new Error(data.error || 'Gagal membuat unit iklan.');
       }
-      const cleanName = input.name.trim().slice(0, ADSENSE_FIELD_LIMITS.unitNameMax);
-      if (!cleanName) {
-        throw new Error('Nama unit iklan wajib diisi.');
-      }
-      const unitId = makeUnitDocId();
-      const docPath = `${UNITS_COLLECTION}/${unitId}`;
-      try {
-        await setDoc(doc(db, UNITS_COLLECTION, unitId), {
-          name: cleanName,
-          slotId: sanitizeSlotDigits(input.slotId),
-          format: asUnitFormat(input.format),
-          placement: asUnitPlacement(input.placement),
-          enabled: Boolean(input.enabled),
-          onlyOnPosts: Boolean(input.onlyOnPosts),
-          notes: input.notes.trim().slice(0, ADSENSE_FIELD_LIMITS.unitNotesMax),
-          createdByUid: user.uid,
-          createdAt: serverTimestamp(),
-          updatedAt: serverTimestamp(),
-        });
-      } catch (error) {
-        handleFirestoreError(error, OperationType.CREATE, docPath);
-      }
+      setUnits(data.units);
     },
-    [user, isAdmin]
+    [requireToken]
   );
 
   const updateAdUnit = useCallback(
@@ -488,108 +483,64 @@ export function useSiteAdsense(
         notes: string;
       }
     ) => {
-      if (!user || !user.emailVerified || !isAdmin) {
-        throw new Error('Hanya Admin yang dapat mengubah unit iklan.');
+      const token = requireToken();
+      const res = await fetch(`/api/admin/adsense/units/${encodeURIComponent(unitId)}`, {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify(patch),
+      });
+      const data = (await res.json()) as { units?: AdsenseUnitRecord[]; error?: string };
+      if (!res.ok || !data.units) {
+        throw new Error(data.error || 'Gagal memperbarui unit iklan.');
       }
-      const cleanName = patch.name.trim().slice(0, ADSENSE_FIELD_LIMITS.unitNameMax);
-      if (!cleanName) {
-        throw new Error('Nama unit iklan wajib diisi.');
-      }
-      const docPath = `${UNITS_COLLECTION}/${unitId}`;
-      try {
-        await updateDoc(doc(db, UNITS_COLLECTION, unitId), {
-          name: cleanName,
-          slotId: sanitizeSlotDigits(patch.slotId),
-          format: asUnitFormat(patch.format),
-          placement: asUnitPlacement(patch.placement),
-          enabled: Boolean(patch.enabled),
-          onlyOnPosts: Boolean(patch.onlyOnPosts),
-          notes: patch.notes.trim().slice(0, ADSENSE_FIELD_LIMITS.unitNotesMax),
-          updatedAt: serverTimestamp(),
-        });
-      } catch (error) {
-        handleFirestoreError(error, OperationType.UPDATE, docPath);
-      }
+      setUnits(data.units);
     },
-    [user, isAdmin]
+    [requireToken]
   );
 
   const deleteAdUnit = useCallback(
     async (unitId: string) => {
-      if (!user || !user.emailVerified || !isAdmin) {
-        throw new Error('Hanya Admin yang dapat menghapus unit iklan.');
+      const token = requireToken();
+      const res = await fetch(`/api/admin/adsense/units/${encodeURIComponent(unitId)}`, {
+        method: 'DELETE',
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      const data = (await res.json()) as { units?: AdsenseUnitRecord[]; error?: string };
+      if (!res.ok || !data.units) {
+        throw new Error(data.error || 'Gagal menghapus unit iklan.');
       }
-      const docPath = `${UNITS_COLLECTION}/${unitId}`;
-      try {
-        await deleteDoc(doc(db, UNITS_COLLECTION, unitId));
-      } catch (error) {
-        handleFirestoreError(error, OperationType.DELETE, docPath);
-      }
+      setUnits(data.units);
     },
-    [user, isAdmin]
-  );
-
-  const addAdminUser = useCallback(
-    async (targetUid: string, email: string, label: string) => {
-      if (!user || !isBootstrappedAdmin) {
-        throw new Error('Hanya Admin utama yang dapat menambahkan Admin tambahan.');
-      }
-      const cleanUid = targetUid.trim();
-      if (!/^[a-zA-Z0-9_-]{1,128}$/.test(cleanUid)) {
-        throw new Error('UID Firebase harus berisi huruf/angka/-/_ yang valid.');
-      }
-      const cleanEmail = email.trim().slice(0, ADSENSE_FIELD_LIMITS.adminEmailMax);
-      if (!cleanEmail.includes('@') || cleanEmail.length < 3) {
-        throw new Error('Masukkan alamat email Google yang valid.');
-      }
-      const docPath = `${ADMINS_COLLECTION}/${cleanUid}`;
-      try {
-        await setDoc(doc(db, ADMINS_COLLECTION, cleanUid), {
-          uid: cleanUid,
-          email: cleanEmail,
-          label: (label.trim() || 'Admin Co-Manager').slice(0, ADSENSE_FIELD_LIMITS.adminLabelMax),
-          addedByUid: user.uid,
-          createdAt: serverTimestamp(),
-        });
-      } catch (error) {
-        handleFirestoreError(error, OperationType.CREATE, docPath);
-      }
-    },
-    [user, isBootstrappedAdmin]
-  );
-
-  const removeAdminUser = useCallback(
-    async (targetUid: string) => {
-      if (!user || !isBootstrappedAdmin) {
-        throw new Error('Hanya Admin utama yang dapat menghapus Admin tambahan.');
-      }
-      const docPath = `${ADMINS_COLLECTION}/${targetUid}`;
-      try {
-        await deleteDoc(doc(db, ADMINS_COLLECTION, targetUid));
-      } catch (error) {
-        handleFirestoreError(error, OperationType.DELETE, docPath);
-      }
-    },
-    [user, isBootstrappedAdmin]
+    [requireToken]
   );
 
   return {
     config,
+    seoConfig,
+    premiumConfig,
+    paymentConfig,
+    freellmPublic,
+    gcloudPublic,
+    dbMode,
     configExistsInCloud,
     loadingConfig,
     savingConfig,
     units,
     loadingUnits,
-    admins,
     isBootstrappedAdmin,
     isAdmin,
-    checkingAdmin,
+    checkingAdmin: false,
     shouldRenderLiveAds,
+    refreshPublicConfig,
     saveGlobalConfig,
+    saveSeoConfig,
+    savePremiumConfig,
+    savePaymentConfig,
     createAdUnit,
     updateAdUnit,
     deleteAdUnit,
-    addAdminUser,
-    removeAdminUser,
   };
 }
