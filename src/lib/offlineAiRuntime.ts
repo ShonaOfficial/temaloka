@@ -11,7 +11,7 @@ export type OfflineAiRuntimeId =
   | 'mediapipe';
 
 export type WorkspaceAiPage =
-  | 'preview'
+  | 'domain'
   | 'layout'
   | 'seo'
   | 'errors'
@@ -356,24 +356,19 @@ function buildLocalPageAudit(
     parsedInfo.redundancyReport.totalDuplicateCssCount +
     parsedInfo.redundancyReport.totalDuplicateJsCount;
 
-  if (page === 'preview') {
+  if (page === 'domain') {
     const highlights: string[] = [
+      `Template aktif "${parsedInfo.templateTitle}" siap dipasangkan ke custom domain Blogger (CNAME ghs.google.com).`,
       parsedInfo.hasViewportMeta
-        ? 'Meta viewport responsif sudah terpasang untuk layar ponsel dan tablet.'
-        : 'Meta viewport belum terdeteksi — disarankan menambahkan <meta name="viewport"> agar tata letak mobile rapi.',
-      `Terdeteksi ${parsedInfo.sections.length} b:section dan ${parsedInfo.widgets.length} widget aktif pada template "${parsedInfo.templateTitle}".`,
-      `Ukuran file XML saat ini ${(parsedInfo.xmlByteSize / 1024).toFixed(1)} KB dengan ${parsedInfo.byteBreakdown.lineCount.toLocaleString('id-ID')} baris.`,
+        ? 'Meta viewport responsif sudah terpasang untuk desktop & mobile.'
+        : 'Meta viewport belum terdeteksi — disarankan menambahkan <meta name="viewport"> agar blog mobile-friendly.',
+      `Terdeteksi ${parsedInfo.sections.length} b:section dan ${parsedInfo.widgets.length} widget aktif pada template.`,
     ];
     return {
       page,
       engineLabel: 'Mesin Heuristik Lokal TemaLoka',
-      summary: parsedInfo.hasViewportMeta
-        ? `Struktur pratinjau "${parsedInfo.templateTitle}" siap diuji di mode Desktop, Tablet, dan Ponsel.`
-        : `Template "${parsedInfo.templateTitle}" belum memiliki meta viewport responsif.`,
+      summary: `Cari nama domain singkat dan mudah diingat untuk blog "${parsedInfo.templateTitle}", lalu hubungkan ke Blogger Custom Domain.`,
       highlights,
-      suggestedCss: !parsedInfo.hasViewportMeta
-        ? 'img, iframe, video { max-width: 100%; height: auto; }\n@media (max-width: 768px) { .main-wrapper, .sidebar-wrapper { width: 100% !important; float: none !important; } }'
-        : undefined,
     };
   }
 

@@ -47,7 +47,6 @@ import type { OfflineAiController } from '../hooks/useOfflineAiRuntime';
 import { runJsonPromptOnLocalServer } from '../lib/offlineAiRuntime';
 import { parseTemplateIdentityFromXml } from '../lib/templateIdentity';
 import { TemplateIdentityModal } from './TemplateIdentityModal';
-import type { PreviewVisualMode } from './PreviewCanvas';
 import { useAuthAndAi } from '../contexts/AuthAndAiContext';
 import { AiEngineSelectorCard } from './AiEngineSelectorCard';
 import { getGeminiModelOption } from '../lib/aiEngineCatalog';
@@ -85,8 +84,7 @@ interface SidebarControlsProps {
   xmlIssuesCount: number;
   onAutoFixOffline: () => void;
   onOpenEditor: () => void;
-  onSetUserBlogVisual: (url: string, visualHtml: string, switchMode?: PreviewVisualMode) => void;
-  onOpenPreview?: () => void;
+  onSetUserBlogVisual: (url: string, visualHtml: string) => void;
   offlineAi: OfflineAiController;
   isOfflineMode?: boolean;
   onSwitchToOnline?: () => void;
@@ -135,7 +133,6 @@ export const SidebarControls: React.FC<SidebarControlsProps> = ({
   onAutoFixOffline,
   onOpenEditor,
   onSetUserBlogVisual,
-  onOpenPreview,
   offlineAi,
   isOfflineMode: appOfflineMode = false,
   onSwitchToOnline,
@@ -249,7 +246,7 @@ export const SidebarControls: React.FC<SidebarControlsProps> = ({
         null
       );
       if (data.visualPreviewHtml) {
-        onSetUserBlogVisual(data.sourceUrl, data.visualPreviewHtml, 'user-site');
+        onSetUserBlogVisual(data.sourceUrl, data.visualPreviewHtml);
       }
       onNotify(
         data.convertedFromLiveSite
@@ -306,7 +303,7 @@ export const SidebarControls: React.FC<SidebarControlsProps> = ({
       setVerifiedSourceUrl(data.fingerprint.sourceUrl);
       if (data.visualPreviewHtml) {
         setVerifiedVisualHtml(data.visualPreviewHtml);
-        onSetUserBlogVisual(data.fingerprint.sourceUrl, data.visualPreviewHtml, 'split');
+        onSetUserBlogVisual(data.fingerprint.sourceUrl, data.visualPreviewHtml);
       }
       onBlogFingerprintFetched?.(
         data.fingerprint.sourceUrl,
@@ -914,7 +911,7 @@ export const SidebarControls: React.FC<SidebarControlsProps> = ({
                       <span>Mengambil Template...</span>
                     </>
                   ) : (
-                    <span>Muat Pratinjau dari URL</span>
+                    <span>Muat Template dari URL</span>
                   )}
                 </button>
               </form>
@@ -1025,18 +1022,6 @@ export const SidebarControls: React.FC<SidebarControlsProps> = ({
                     </ul>
                   )}
                   <div className="flex flex-wrap items-center gap-2 pt-1">
-                    {verifiedVisualHtml && verifiedSourceUrl && (
-                      <button
-                        type="button"
-                        onClick={() => {
-                          onSetUserBlogVisual(verifiedSourceUrl, verifiedVisualHtml, 'user-site');
-                          onOpenPreview?.();
-                        }}
-                        className="px-2.5 py-1 bg-slate-900 text-white text-[11px] font-medium rounded cursor-pointer"
-                      >
-                        Lihat Iframe Visual &rarr;
-                      </button>
-                    )}
                     {verifyResult.verdict === 'different' && verifiedSourceUrl && (
                       <button
                         type="button"

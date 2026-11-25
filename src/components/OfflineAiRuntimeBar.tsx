@@ -42,7 +42,7 @@ interface OfflineAiRuntimeBarProps {
 }
 
 const PAGE_LABELS: Record<WorkspaceAiPage, string> = {
-  preview: 'Pratinjau Responsif',
+  domain: 'Pencari Nama Domain',
   layout: 'Tata Letak Blogger',
   seo: 'SEO & Monetisasi',
   errors: 'Diagnosa Error Studio',

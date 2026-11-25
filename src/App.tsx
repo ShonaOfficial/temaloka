@@ -4,7 +4,7 @@ import {
   Code2,
   Crown,
   Download,
-  Eye,
+  Globe,
   LayoutGrid,
   Maximize2,
   Minimize2,
@@ -24,7 +24,6 @@ import {
 } from './data/presets';
 import {
   parseBloggerXml,
-  compileBloggerPreviewHtml,
   downloadXmlFile,
   exportModifiedBloggerXml,
   getUtf8ByteLength,
@@ -39,9 +38,7 @@ import {
 import type {
   DevConsoleLevel,
   DevConsoleLogEntry,
-  DevicePreset,
   FontCustomization,
-  PreviewPageType,
   SampleBlogData,
   ThemePaletteOverrides,
 } from './types/blogger';
@@ -50,7 +47,7 @@ import type {
   TemplateMatchComparison,
 } from './lib/seoAndErrorAnalyzer';
 import { SidebarControls, type SidebarTab } from './components/SidebarControls';
-import { PreviewCanvas, type PreviewVisualMode } from './components/PreviewCanvas';
+import { DomainSearchView } from './components/DomainSearchView';
 import { XmlEditorView } from './components/XmlEditorView';
 import { VariableInspectorView } from './components/VariableInspectorView';
 import { BloggerLayoutView } from './components/BloggerLayoutView';
@@ -86,7 +83,7 @@ import { AiChatDrawer } from './components/AiChatDrawer';
 import { CloudNotepadDrawer } from './components/CloudNotepadDrawer';
 import { useCloudNotepad } from './hooks/useCloudNotepad';
 import { useSiteAdsense } from './hooks/useSiteAdsense';
-import { AdminAdsensePanel } from './components/AdminAdsensePanel';
+import { AdminAdsensePanel, type AdminTab } from './components/AdminAdsensePanel';
 import { AdsenseSlotRenderer } from './components/AdsenseSlotRenderer';
 import { ProFeatureGate } from './components/ProFeatureGate';
 import { ProUpgradePaymentModal } from './components/ProUpgradePaymentModal';
@@ -97,7 +94,7 @@ import {
 } from './lib/featureRegistry';
 
 type WorkspaceView =
-  | 'preview'
+  | 'domain'
   | 'layout'
   | 'seo'
   | 'errors'
@@ -175,7 +172,7 @@ function loadInitialWorkspace(): SavedWorkspaceState {
 }
 
 const WORKSPACE_TABS: Array<[WorkspaceView, string]> = [
-  ['preview', 'Pratinjau'],
+  ['domain', 'Cari Domain'],
   ['layout', 'Tata Letak'],
   ['seo', 'SEO & Iklan'],
   ['errors', 'Diagnosa Error'],
@@ -186,7 +183,7 @@ const WORKSPACE_TABS: Array<[WorkspaceView, string]> = [
 ];
 
 const WORKSPACE_FEATURE_MAP: Record<WorkspaceView, string> = {
-  preview: 'workspace_preview',
+  domain: 'workspace_domain',
   layout: 'workspace_layout',
   seo: 'seo_analyzer_starter',
   errors: 'xml_autofix_worker',
@@ -241,7 +238,7 @@ function TemaLokaWorkspace({
     toggleChatOpen,
   } = useAuthAndAi();
 
-  const [workspaceView, setWorkspaceView] = useState<WorkspaceView>('preview');
+  const [workspaceView, setWorkspaceView] = useState<WorkspaceView>('domain');
   const [sidebarTab, setSidebarTab] = useState<SidebarTab>('sumber');
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
   const [mobileStudioSheetOpen, setMobileStudioSheetOpen] = useState(false);
@@ -276,12 +273,6 @@ function TemaLokaWorkspace({
   const [fonts, setFonts] = useState<FontCustomization>(saved.fonts || DEFAULT_FONTS);
   const [customCss, setCustomCss] = useState<string>(saved.customCss || '');
 
-  const [device, setDevice] = useState<DevicePreset>('desktop');
-  const [isLandscape, setIsLandscape] = useState(false);
-  const [zoom, setZoom] = useState<'fit' | 1 | 0.75>('fit');
-  const [pageType, setPageType] = useState<PreviewPageType>('index');
-  const [activePostId, setActivePostId] = useState<string>(DEFAULT_SAMPLE_BLOG.posts[0].id);
-  const [activeCategory, setActiveCategory] = useState<string | null>(null);
   const [sampleData, setSampleData] = useState<SampleBlogData>(DEFAULT_SAMPLE_BLOG);
 
   const [editorFocusLine, setEditorFocusLine] = useState<number | null>(null);
@@ -300,12 +291,12 @@ function TemaLokaWorkspace({
   const [previewConsoleLogs, setPreviewConsoleLogs] = useState<DevConsoleLogEntry[]>([]);
   const [pendingConsolePayload, setPendingConsolePayload] =
     useState<PendingConsoleInjection | null>(null);
-  const [previewVisualMode, setPreviewVisualMode] = useState<PreviewVisualMode>('xml');
   const [exportModalOpen, setExportModalOpen] = useState(false);
   const [snapshots, setSnapshots] = useState<XmlSnapshotRecord[]>([]);
   const [snapshotDrawerOpen, setSnapshotDrawerOpen] = useState(false);
   const [notepadOpen, setNotepadOpen] = useState(false);
   const [upgradeModalOpen, setUpgradeModalOpen] = useState(false);
+  const [adminInitialTab, setAdminInitialTab] = useState<AdminTab>('d1');
   const offlineAi = useOfflineAiRuntime();
   const { isOfflineMode, setOfflineMode } = useAppOfflineMode();
   const siteAdsense = useSiteAdsense(user, authReady, isOfflineMode);
@@ -332,9 +323,12 @@ function TemaLokaWorkspace({
     };
   }, [checkAdminUrl]);
 
-  const openAdminRoute = useCallback(() => {
+  const openAdminRoute = useCallback((targetTab?: AdminTab) => {
     setMobileMoreOpen(false);
     setMobileSidebarOpen(false);
+    if (typeof targetTab === 'string') {
+      setAdminInitialTab(targetTab);
+    }
     if (typeof window !== 'undefined') {
       const url = new URL(window.location.href);
       url.search = '?admin';
@@ -499,34 +493,18 @@ function TemaLokaWorkspace({
     sharedBlogUrl,
   ]);
 
-  // Listen to interactive clicks & console output inside the sandboxed Blogspot preview iframe
+  // Listen to console output inside sandboxed frames if any
   useEffect(() => {
     const handleMessage = (event: MessageEvent) => {
       const payload = event.data;
       if (!payload || typeof payload !== 'object') return;
 
-      if (payload.source === 'temaloka-preview') {
-        if (payload.action === 'home') {
-          setPageType('index');
-          setActiveCategory(null);
-        } else if (payload.action === 'post' && payload.postId) {
-          setActivePostId(payload.postId);
-          setPageType('item');
-        } else if (payload.action === 'category' && payload.category) {
-          setActiveCategory(payload.category);
-          setPageType('archive');
-        } else if (payload.action === 'apply-query' && payload.params && typeof payload.params === 'object') {
-          const nextMap: Record<string, string> = {};
-          for (const [k, v] of Object.entries(payload.params as Record<string, unknown>)) {
-            if (k && typeof v === 'string') nextMap[k] = v;
-          }
-          setPreviewQueryParams(nextMap);
-          const qStr = new URLSearchParams(nextMap).toString();
-          notify(
-            qStr ? `Parameter URL (?${qStr}) diterapkan ke Pratinjau.` : 'Parameter URL pratinjau dikosongkan.',
-            'info'
-          );
+      if (payload.source === 'temaloka-preview' && payload.action === 'apply-query' && payload.params && typeof payload.params === 'object') {
+        const nextMap: Record<string, string> = {};
+        for (const [k, v] of Object.entries(payload.params as Record<string, unknown>)) {
+          if (k && typeof v === 'string') nextMap[k] = v;
         }
+        setPreviewQueryParams(nextMap);
       } else if (payload.source === 'temaloka-preview-console' && typeof payload.message === 'string') {
         const rawLv = String(payload.level || 'log');
         const level: DevConsoleLevel =
@@ -626,8 +604,6 @@ function TemaLokaWorkspace({
       setFonts(DEFAULT_FONTS);
       setCustomCss('');
       setPreviewQueryParams({});
-      setPageType('index');
-      setActiveCategory(null);
       recordSnapshot(xml, `Muat Template: ${label}`, 'import', false);
     },
     [recordSnapshot]
@@ -638,7 +614,7 @@ function TemaLokaWorkspace({
       const found = TEMPLATE_PRESETS.find((p) => p.id === presetId);
       if (!found) return;
       handleLoadXmlContent(found.xml, `Preset: ${found.name}`, found.id);
-      notify(`Template "${found.name}" dimuat ke pratinjau.`, 'success');
+      notify(`Template "${found.name}" dimuat ke studio XML.`, 'success');
     },
     [handleLoadXmlContent, notify]
   );
@@ -674,16 +650,6 @@ function TemaLokaWorkspace({
       return next;
     });
   }, []);
-
-  const handleResetCustomizations = useCallback(() => {
-    setVariableValues({});
-    setCssVarValues({});
-    setColorReplacements({});
-    setColors(DEFAULT_COLORS);
-    setFonts(DEFAULT_FONTS);
-    setCustomCss('');
-    notify('Semua penyesuaian warna, font, dan CSS dikembalikan ke bawaan XML.', 'info');
-  }, [notify]);
 
   const handleDirectXmlUpdate = useCallback(
     (nextXml: string, feedbackMessage: string) => {
@@ -809,13 +775,9 @@ function TemaLokaWorkspace({
   }, []);
 
   const handleSetUserBlogVisual = useCallback(
-    (url: string, visualHtml: string, switchMode?: PreviewVisualMode) => {
+    (url: string, visualHtml: string) => {
       setUserBlogVisualUrl(url);
       setUserBlogVisualHtml(visualHtml);
-      if (switchMode) {
-        setPreviewVisualMode(switchMode);
-        setWorkspaceView('preview');
-      }
     },
     []
   );
@@ -838,14 +800,6 @@ function TemaLokaWorkspace({
     []
   );
 
-  const hasCustomizations =
-    colors.enabled ||
-    fonts.enabled ||
-    customCss.trim().length > 0 ||
-    Object.keys(variableValues).length > 0 ||
-    Object.keys(cssVarValues).length > 0 ||
-    Object.keys(colorReplacements).length > 0;
-
   const currentXmlBytes = useMemo(() => getUtf8ByteLength(xmlSource), [xmlSource]);
 
   const activeAiSignatureSummary = useMemo(
@@ -854,22 +808,18 @@ function TemaLokaWorkspace({
   );
 
   const handleApplyPreviewQueryParams = useCallback(
-    (nextParams: Record<string, string>, openPreview = false) => {
+    (nextParams: Record<string, string>) => {
       const cleaned: Record<string, string> = {};
       for (const [k, v] of Object.entries(nextParams)) {
         const key = k.trim();
         if (key) cleaned[key] = v;
       }
       setPreviewQueryParams(cleaned);
-      if (openPreview) {
-        setPreviewVisualMode('xml');
-        setWorkspaceView('preview');
-      }
       const qStr = new URLSearchParams(cleaned).toString();
       notify(
         qStr
-          ? `Parameter uji (?${qStr}) diterapkan ke Pratinjau XML.`
-          : 'Parameter URL pratinjau dikembalikan ke bawaan.',
+          ? `Parameter uji (?${qStr}) disimpan ke Konsol URL.`
+          : 'Parameter URL dikembalikan ke bawaan.',
         'success'
       );
     },
@@ -878,46 +828,8 @@ function TemaLokaWorkspace({
 
   const handleResetPreviewQueryParams = useCallback(() => {
     setPreviewQueryParams({});
-    notify('Semua parameter query pratinjau di-reset ke bawaan.', 'info');
+    notify('Semua parameter query di-reset ke bawaan.', 'info');
   }, [notify]);
-
-  const compiledHtml = useMemo(() => {
-    if (workspaceView !== 'preview') return '';
-    return compileBloggerPreviewHtml({
-      xml: xmlSource,
-      variableValues,
-      cssVarValues,
-      colorReplacements,
-      parsedInfo,
-      colors,
-      fonts,
-      customCss,
-      sampleData,
-      pageType,
-      activePostId,
-      activeCategory,
-      device,
-      offlineMode: isOfflineMode,
-      previewQueryParams,
-    });
-  }, [
-    workspaceView,
-    xmlSource,
-    variableValues,
-    cssVarValues,
-    colorReplacements,
-    parsedInfo,
-    colors,
-    fonts,
-    customCss,
-    sampleData,
-    pageType,
-    activePostId,
-    activeCategory,
-    device,
-    isOfflineMode,
-    previewQueryParams,
-  ]);
 
   const siteAdsenseSlotProps = useMemo(
     () => ({
@@ -962,6 +874,7 @@ function TemaLokaWorkspace({
           parsedInfo={parsedInfo}
           onUpdateXml={handleDirectXmlUpdate}
           onExitAdmin={closeAdminRoute}
+          initialTab={adminInitialTab}
           onNotify={notify}
         />
 
@@ -1002,7 +915,7 @@ function TemaLokaWorkspace({
               href="#top"
               onClick={(e) => {
                 e.preventDefault();
-                setWorkspaceView('preview');
+                setWorkspaceView('domain');
               }}
               className="font-display text-base sm:text-lg font-bold tracking-tight text-slate-900 whitespace-nowrap shrink-0"
             >
@@ -1086,7 +999,7 @@ function TemaLokaWorkspace({
 
             <GoogleAccountButton
               isOfflineMode={isOfflineMode}
-              onOpenAdminPanel={openAdminRoute}
+              onOpenAdminPanel={() => openAdminRoute()}
               onOpenUpgradeModal={() => setUpgradeModalOpen(true)}
               showUpgradeButton={!isAdmin && userTier === 'free'}
               isAdFree={isAdFreeUser}
@@ -1096,7 +1009,7 @@ function TemaLokaWorkspace({
             {siteAdsense.isAdmin && (
               <button
                 type="button"
-                onClick={openAdminRoute}
+                onClick={() => openAdminRoute()}
                 title="Buka Panel Admin"
                 className="hidden sm:flex items-center gap-1.5 px-2.5 py-1.5 min-h-[34px] text-xs font-semibold rounded-lg border border-emerald-200 bg-emerald-50 hover:bg-emerald-100 text-emerald-800 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
               >
@@ -1396,7 +1309,6 @@ function TemaLokaWorkspace({
               onAutoFixOffline={handleGlobalOfflineAutoFix}
               onOpenEditor={() => setWorkspaceView('editor')}
               onSetUserBlogVisual={handleSetUserBlogVisual}
-              onOpenPreview={() => setWorkspaceView('preview')}
               offlineAi={offlineAi}
               isOfflineMode={isOfflineMode}
               onSwitchToOnline={handleSwitchToOnline}
@@ -1470,10 +1382,6 @@ function TemaLokaWorkspace({
                     setMobileSidebarOpen(false);
                   }}
                   onSetUserBlogVisual={handleSetUserBlogVisual}
-                  onOpenPreview={() => {
-                    setWorkspaceView('preview');
-                    setMobileSidebarOpen(false);
-                  }}
                   offlineAi={offlineAi}
                   isOfflineMode={isOfflineMode}
                   onSwitchToOnline={handleSwitchToOnline}
@@ -1499,47 +1407,28 @@ function TemaLokaWorkspace({
         )}
 
         {/* Active Center Viewport */}
-        {workspaceView === 'preview' && (
-          <PreviewCanvas
-            compiledHtml={compiledHtml}
-            xml={xmlSource}
-            parsedInfo={parsedInfo}
-            offlineAi={offlineAi}
-            onApplySuggestedCss={(suggested) => {
-              if (!suggested.trim()) return;
-              setCustomCss((prev) => [prev, suggested].filter(Boolean).join('\n\n'));
-              notify('Saran CSS responsif dari AI Offline diterapkan ke pratinjau.', 'success');
-            }}
-            userBlogVisualHtml={userBlogVisualHtml}
-            userBlogVisualUrl={userBlogVisualUrl}
-            visualMode={previewVisualMode}
-            onVisualModeChange={setPreviewVisualMode}
-            onClearUserBlogVisual={() => {
-              setUserBlogVisualHtml(null);
-              setUserBlogVisualUrl(null);
-              setPreviewVisualMode('xml');
-            }}
-            device={device}
-            onDeviceChange={setDevice}
-            isLandscape={isLandscape}
-            onToggleLandscape={() => setIsLandscape((v) => !v)}
-            pageType={pageType}
-            onPageTypeChange={setPageType}
-            activeCategory={activeCategory}
-            onClearCategory={() => setActiveCategory(null)}
-            zoom={zoom}
-            onZoomChange={setZoom}
-            hasCustomizations={hasCustomizations}
-            onResetCustomizations={handleResetCustomizations}
-            isOfflineMode={isOfflineMode}
-            activePresetId={activePresetId}
-            sourceLabel={sourceLabel}
-            onLoadXmlContent={handleLoadXmlContent}
-            previewQueryParams={previewQueryParams}
-            onApplyPreviewQueryParams={handleApplyPreviewQueryParams}
-            onResetPreviewQueryParams={handleResetPreviewQueryParams}
-            onNotify={notify}
-          />
+        {workspaceView === 'domain' && (
+          <ProFeatureGate
+            featureId="workspace_domain"
+            premiumConfig={siteAdsense.premiumConfig}
+            paymentConfig={siteAdsense.paymentConfig}
+            user={user}
+            userTier={userTier}
+            isAdmin={isAdmin}
+            onOpenAuthModal={openAuthModal}
+            onOpenPaymentModal={() => setUpgradeModalOpen(true)}
+            onOpenAdminPanel={() => openAdminRoute('domain')}
+          >
+            <DomainSearchView
+              domainConfig={siteAdsense.domainAffiliateConfig}
+              isOfflineMode={isOfflineMode}
+              onSwitchToOnline={handleSwitchToOnline}
+              isAdmin={siteAdsense.isAdmin}
+              onOpenAdminDomainSettings={() => openAdminRoute('domain')}
+              templateTitle={parsedInfo.templateTitle}
+              onNotify={notify}
+            />
+          </ProFeatureGate>
         )}
 
         {workspaceView === 'layout' && (
@@ -1723,9 +1612,9 @@ function TemaLokaWorkspace({
               offlineAi={offlineAi}
               onApplyMergedXml={(nextXml, label, openView) => {
                 handleLoadXmlContent(nextXml, label, null);
-                setWorkspaceView(openView || 'preview');
+                setWorkspaceView(openView || 'layout');
                 notify(
-                  `Hasil penggabungan XML dimuat ke ${openView === 'editor' ? 'Editor XML' : 'Pratinjau'}.`,
+                  `Hasil penggabungan XML dimuat ke ${openView === 'editor' ? 'Editor XML' : 'Tata Letak'}.`,
                   'success'
                 );
               }}
@@ -1744,7 +1633,7 @@ function TemaLokaWorkspace({
             isAdmin={isAdmin}
             onOpenAuthModal={openAuthModal}
             onOpenPaymentModal={() => setUpgradeModalOpen(true)}
-            onOpenAdminPanel={openAdminRoute}
+            onOpenAdminPanel={() => openAdminRoute()}
           >
             <UrlConsoleView
               xml={xmlSource}
@@ -1755,12 +1644,6 @@ function TemaLokaWorkspace({
               comparisonResult={liveBlogComparison}
               userBlogVisualHtml={userBlogVisualHtml}
               onBlogFingerprintFetched={handleBlogFingerprintFetched}
-              onOpenUserBlogPreview={() => {
-                if (userBlogVisualHtml) {
-                  setPreviewVisualMode('user-site');
-                  setWorkspaceView('preview');
-                }
-              }}
               previewConsoleLogs={previewConsoleLogs}
               onClearPreviewLogs={() => setPreviewConsoleLogs([])}
               pendingConsolePayload={pendingConsolePayload}
@@ -1867,16 +1750,16 @@ function TemaLokaWorkspace({
             type="button"
             onClick={() => {
               setMobileStudioSheetOpen(false);
-              setWorkspaceView('preview');
+              setWorkspaceView('domain');
             }}
             className={`min-h-[46px] flex flex-col items-center justify-center gap-0.5 rounded-lg text-[11px] font-medium transition-colors cursor-pointer ${
-              workspaceView === 'preview' && !mobileSidebarOpen && !mobileStudioSheetOpen
+              workspaceView === 'domain' && !mobileSidebarOpen && !mobileStudioSheetOpen
                 ? 'text-blue-600 font-semibold bg-blue-50/70'
                 : 'text-slate-600 hover:text-slate-900'
             }`}
           >
-            <Eye className="w-4 h-4" />
-            <span>Pratinjau</span>
+            <Globe className="w-4 h-4" />
+            <span>Domain</span>
           </button>
 
           <button
@@ -1915,7 +1798,7 @@ function TemaLokaWorkspace({
             type="button"
             onClick={() => setMobileStudioSheetOpen((v) => !v)}
             className={`min-h-[46px] flex flex-col items-center justify-center gap-0.5 rounded-lg text-[11px] font-medium transition-colors cursor-pointer ${
-              mobileStudioSheetOpen || (workspaceView !== 'preview' && workspaceView !== 'editor')
+              mobileStudioSheetOpen || (workspaceView !== 'domain' && workspaceView !== 'editor')
                 ? 'text-blue-600 font-semibold bg-blue-50/70'
                 : 'text-slate-600 hover:text-slate-900'
             }`}

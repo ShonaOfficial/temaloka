@@ -9,10 +9,12 @@ import {
   type SiteAdsenseConfig,
 } from '../types/adsense';
 import {
+  DEFAULT_DOMAIN_AFFILIATE_CONFIG,
   DEFAULT_PAYMENT_SETTINGS,
   DEFAULT_SITE_SEO_CONFIG,
   type AuthUserSession,
   type DbStorageMode,
+  type DomainAffiliateConfig,
   type FreeLlmPublicStatus,
   type GoogleCloudPublicStatus,
   type PaymentSettingsConfig,
@@ -33,6 +35,7 @@ export interface SiteAdsenseController {
   seoConfig: SiteSeoConfig;
   premiumConfig: PremiumSettingsConfig;
   paymentConfig: PaymentSettingsConfig;
+  domainAffiliateConfig: DomainAffiliateConfig;
   freellmPublic: FreeLlmPublicStatus;
   gcloudPublic: GoogleCloudPublicStatus;
   dbMode: DbStorageMode;
@@ -50,6 +53,7 @@ export interface SiteAdsenseController {
   saveSeoConfig: (next: SiteSeoConfig) => Promise<void>;
   savePremiumConfig: (next: PremiumSettingsConfig) => Promise<void>;
   savePaymentConfig: (next: PaymentSettingsConfig) => Promise<void>;
+  saveDomainAffiliateConfig: (next: DomainAffiliateConfig) => Promise<void>;
   createAdUnit: (input: {
     name: string;
     slotId: string;
@@ -111,6 +115,9 @@ export function useSiteAdsense(
   const [seoConfig, setSeoConfig] = useState<SiteSeoConfig>(DEFAULT_SITE_SEO_CONFIG);
   const [premiumConfig, setPremiumConfig] = useState<PremiumSettingsConfig>(DEFAULT_PREMIUM_CONFIG);
   const [paymentConfig, setPaymentConfig] = useState<PaymentSettingsConfig>(DEFAULT_PAYMENT_SETTINGS);
+  const [domainAffiliateConfig, setDomainAffiliateConfig] = useState<DomainAffiliateConfig>(
+    DEFAULT_DOMAIN_AFFILIATE_CONFIG
+  );
   const [freellmPublic, setFreellmPublic] = useState<FreeLlmPublicStatus>({
     enabled: true,
     defaultModel: 'auto',
@@ -162,6 +169,9 @@ export function useSiteAdsense(
       }
       if (data.payment) {
         setPaymentConfig(data.payment);
+      }
+      if (data.domainAffiliate) {
+        setDomainAffiliateConfig(data.domainAffiliate);
       }
       if (data.freellm) {
         setFreellmPublic(data.freellm);
@@ -442,6 +452,36 @@ export function useSiteAdsense(
     [requireToken]
   );
 
+  const saveDomainAffiliateConfig = useCallback(
+    async (next: DomainAffiliateConfig) => {
+      const token = requireToken();
+      setSavingConfig(true);
+      try {
+        const res = await fetch('/api/admin/domain-affiliate', {
+          method: 'PUT',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${token}`,
+          },
+          body: JSON.stringify(next),
+        });
+        const data = (await res.json()) as {
+          domainAffiliate?: DomainAffiliateConfig;
+          error?: string;
+        };
+        if (!res.ok || !data.domainAffiliate) {
+          throw new Error(
+            data.error || 'Gagal menyimpan pengaturan Afiliasi & Registrar Domain.'
+          );
+        }
+        setDomainAffiliateConfig(data.domainAffiliate);
+      } finally {
+        setSavingConfig(false);
+      }
+    },
+    [requireToken]
+  );
+
   const createAdUnit = useCallback(
     async (input: {
       name: string;
@@ -522,6 +562,7 @@ export function useSiteAdsense(
     seoConfig,
     premiumConfig,
     paymentConfig,
+    domainAffiliateConfig,
     freellmPublic,
     gcloudPublic,
     dbMode,
@@ -539,6 +580,7 @@ export function useSiteAdsense(
     saveSeoConfig,
     savePremiumConfig,
     savePaymentConfig,
+    saveDomainAffiliateConfig,
     createAdUnit,
     updateAdUnit,
     deleteAdUnit,

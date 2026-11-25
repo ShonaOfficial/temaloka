@@ -3,9 +3,12 @@ import {
   AlertCircle,
   ArrowLeft,
   Ban,
+  BookOpen,
   Building2,
   Check,
   CheckCircle2,
+  ChevronDown,
+  ChevronUp,
   Cloud,
   Code2,
   Copy,
@@ -59,9 +62,18 @@ import {
   type TopBannerFormat,
 } from '../types/adsense';
 import {
+  buildAffiliateDomainUrl,
+  DEFAULT_DOMAIN_AFFILIATE_CONFIG,
+  findRegistrarSignupGuide,
+  normalizeTldValue,
+  REGISTRAR_SIGNUP_GUIDES,
   sanitizePublicHttpUrl,
   type AdminAuthStatus,
+  type AffiliateRegistrarRecord,
   type CloudflareD1AdminConfigView,
+  type DomainAffiliateConfig,
+  type DomainTldCategory,
+  type DomainTldPricingRule,
   type FreeLlmAdminConfigView,
   type FreeLlmRoutingStrategy,
   type GoogleCloudAdminConfigView,
@@ -69,6 +81,7 @@ import {
   type ManualPaymentMethod,
   type ManualPaymentMethodType,
   type PaymentSettingsConfig,
+  type RegistrarSignupGuide,
   type SiteSeoConfig,
   type UserAccountTier,
 } from '../types/admin';
@@ -95,13 +108,15 @@ interface AdminAdsensePanelProps {
   parsedInfo: ParsedTemplateInfo;
   onUpdateXml: (nextXml: string, feedbackMessage: string) => void;
   onExitAdmin: () => void;
+  initialTab?: AdminTab;
   onNotify?: (message: string, type?: 'success' | 'error' | 'info') => void;
 }
 
-type AdminTab =
+export type AdminTab =
   | 'd1'
   | 'gcloud'
   | 'freellm'
+  | 'domain'
   | 'premium'
   | 'payment'
   | 'seo'
@@ -124,6 +139,7 @@ export const AdminAdsensePanel: React.FC<AdminAdsensePanelProps> = ({
   parsedInfo,
   onUpdateXml,
   onExitAdmin,
+  initialTab,
   onNotify,
 }) => {
   const {
@@ -140,7 +156,13 @@ export const AdminAdsensePanel: React.FC<AdminAdsensePanelProps> = ({
     signOutAccount,
   } = useAuthAndAi();
 
-  const [activeTab, setActiveTab] = useState<AdminTab>('d1');
+  const [activeTab, setActiveTab] = useState<AdminTab>(initialTab || 'd1');
+
+  useEffect(() => {
+    if (initialTab) {
+      setActiveTab(initialTab);
+    }
+  }, [initialTab]);
   const [adsenseSubTab, setAdsenseSubTab] = useState<AdsenseSubTab>('global');
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
   const [actionBusy, setActionBusy] = useState(false);
@@ -297,6 +319,32 @@ export const AdminAdsensePanel: React.FC<AdminAdsensePanelProps> = ({
   const [payEnabled, setPayEnabled] = useState(true);
   const [paymentMethodBusy, setPaymentMethodBusy] = useState(false);
 
+  // Domain Finder & Affiliate Registrars states
+  const [domainDraft, setDomainDraft] = useState<DomainAffiliateConfig>(
+    siteAdsense.domainAffiliateConfig
+  );
+  const [domainDirty, setDomainDirty] = useState(false);
+  const [editingRegistrarId, setEditingRegistrarId] = useState<string | null>(null);
+  const [regName, setRegName] = useState('');
+  const [regTemplateUrl, setRegTemplateUrl] = useState('');
+  const [regWebsiteUrl, setRegWebsiteUrl] = useState('');
+  const [regAffiliateId, setRegAffiliateId] = useState('');
+  const [regCommissionNote, setRegCommissionNote] = useState('');
+  const [regPromoCode, setRegPromoCode] = useState('');
+  const [regBadgeLabel, setRegBadgeLabel] = useState('');
+  const [regSupportedTldsText, setRegSupportedTldsText] = useState('');
+  const [regIsFeatured, setRegIsFeatured] = useState(false);
+  const [regEnabled, setRegEnabled] = useState(true);
+  const [domainBusy, setDomainBusy] = useState(false);
+  const [newTldInput, setNewTldInput] = useState('');
+  const [newTldCat, setNewTldCat] = useState<DomainTldCategory>('populer');
+  const [newTldRegPrice, setNewTldRegPrice] = useState('');
+  const [newTldRenewPrice, setNewTldRenewPrice] = useState('');
+  const [newTldPromoTag, setNewTldPromoTag] = useState('');
+  const [expandedGuideId, setExpandedGuideId] = useState<string | null>('namecheap');
+  const [inlineRowGuideId, setInlineRowGuideId] = useState<string | null>(null);
+  const registrarFormRef = React.useRef<HTMLFormElement | null>(null);
+
   const loadAdminAuthStatus = useCallback(async () => {
     setLoadingAdminStatus(true);
     try {
@@ -339,6 +387,10 @@ export const AdminAdsensePanel: React.FC<AdminAdsensePanelProps> = ({
   useEffect(() => {
     if (!paymentDirty) setPaymentDraft(siteAdsense.paymentConfig);
   }, [siteAdsense.paymentConfig, paymentDirty]);
+
+  useEffect(() => {
+    if (!domainDirty) setDomainDraft(siteAdsense.domainAffiliateConfig);
+  }, [siteAdsense.domainAffiliateConfig, domainDirty]);
 
   useEffect(() => {
     if (user?.role === 'admin') {
@@ -1324,6 +1376,257 @@ export const AdminAdsensePanel: React.FC<AdminAdsensePanelProps> = ({
     }
   };
 
+  const resetRegistrarForm = () => {
+    setEditingRegistrarId(null);
+    setRegName('');
+    setRegTemplateUrl('');
+    setRegWebsiteUrl('');
+    setRegAffiliateId('');
+    setRegCommissionNote('');
+    setRegPromoCode('');
+    setRegBadgeLabel('');
+    setRegSupportedTldsText('');
+    setRegIsFeatured(false);
+    setRegEnabled(true);
+  };
+
+  const startEditRegistrar = (reg: AffiliateRegistrarRecord) => {
+    setEditingRegistrarId(reg.id);
+    setRegName(reg.name);
+    setRegTemplateUrl(reg.affiliateUrlTemplate);
+    setRegWebsiteUrl(reg.websiteUrl);
+    setRegAffiliateId(reg.affiliateId);
+    setRegCommissionNote(reg.commissionNote);
+    setRegPromoCode(reg.promoCode);
+    setRegBadgeLabel(reg.badgeLabel);
+    setRegSupportedTldsText(reg.supportedTlds.join(', '));
+    setRegIsFeatured(reg.isFeatured);
+    setRegEnabled(reg.enabled);
+  };
+
+  const applyRegistrarGuideToForm = (guide: RegistrarSignupGuide) => {
+    const existing = domainDraft.registrars.find(
+      (r) =>
+        r.id.toLowerCase() === guide.id.toLowerCase() ||
+        r.name.toLowerCase().includes(guide.id.toLowerCase())
+    );
+    if (existing) {
+      setEditingRegistrarId(existing.id);
+      setRegName(existing.name);
+      const hasAffToken = /\{aff(iliate)?Id\}/i.test(existing.affiliateUrlTemplate || '');
+      setRegTemplateUrl(
+        hasAffToken ? existing.affiliateUrlTemplate : guide.recommendedTemplate
+      );
+      setRegWebsiteUrl(existing.websiteUrl || guide.signupUrl);
+      setRegAffiliateId(existing.affiliateId);
+      setRegCommissionNote(existing.commissionNote || guide.commissionSummary);
+      setRegPromoCode(existing.promoCode);
+      setRegBadgeLabel(existing.badgeLabel);
+      setRegSupportedTldsText(existing.supportedTlds.join(', '));
+      setRegIsFeatured(existing.isFeatured);
+      setRegEnabled(existing.enabled);
+    } else {
+      resetRegistrarForm();
+      setRegName(guide.name);
+      setRegTemplateUrl(guide.recommendedTemplate);
+      setRegWebsiteUrl(guide.signupUrl);
+      setRegCommissionNote(guide.commissionSummary);
+    }
+    registrarFormRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    onNotify?.(
+      `Form diisi untuk ${guide.name}. Masukkan ID Afiliasi atau URL pelacakan Anda lalu klik Simpan.`,
+      'info'
+    );
+  };
+
+  const handleSaveDomainConfig = async () => {
+    try {
+      await siteAdsense.saveDomainAffiliateConfig(domainDraft);
+      setDomainDirty(false);
+      onNotify?.('Pengaturan Pencari Domain & Afiliasi berhasil disimpan.', 'success');
+    } catch (err) {
+      onNotify?.(
+        err instanceof Error ? err.message : 'Gagal menyimpan pengaturan domain.',
+        'error'
+      );
+    }
+  };
+
+  const handleSaveRegistrar = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const cleanName = regName.trim();
+    if (!cleanName) {
+      onNotify?.('Nama situs / registrar wajib diisi (misal: Namecheap, DomaiNesia).', 'error');
+      return;
+    }
+    const tplRaw = regTemplateUrl.trim();
+    const webRaw = regWebsiteUrl.trim();
+    if (!tplRaw && !webRaw) {
+      onNotify?.('Isi Template Link Afiliasi atau URL Website utama registrar.', 'error');
+      return;
+    }
+    if (tplRaw) {
+      const testBuilt = buildAffiliateDomainUrl(
+        {
+          affiliateUrlTemplate: tplRaw,
+          websiteUrl: webRaw,
+          affiliateId: regAffiliateId.trim(),
+        },
+        'contohblog.com'
+      );
+      if (!testBuilt) {
+        onNotify?.('Template Link Afiliasi harus diawali http:// atau https:// yang valid.', 'error');
+        return;
+      }
+    }
+    if (webRaw && !sanitizePublicHttpUrl(webRaw)) {
+      onNotify?.('URL Website utama harus diawali http:// atau https:// yang valid.', 'error');
+      return;
+    }
+
+    const supportedTlds = Array.from(
+      new Set(
+        regSupportedTldsText
+          .split(/[,\s]+/)
+          .map((t) => normalizeTldValue(t))
+          .filter(Boolean)
+      )
+    );
+
+    const regRecord: AffiliateRegistrarRecord = {
+      id:
+        editingRegistrarId ||
+        `${cleanName.toLowerCase().replace(/[^a-z0-9]/g, '_').slice(0, 18) || 'reg'}_${Date.now().toString(36)}`,
+      name: cleanName,
+      affiliateUrlTemplate: tplRaw,
+      websiteUrl: sanitizePublicHttpUrl(webRaw),
+      affiliateId: regAffiliateId.trim(),
+      commissionNote: regCommissionNote.trim(),
+      promoCode: regPromoCode.trim(),
+      badgeLabel: regBadgeLabel.trim(),
+      supportedTlds,
+      isFeatured: regIsFeatured,
+      enabled: regEnabled,
+    };
+
+    setDomainBusy(true);
+    try {
+      let nextRegistrars = editingRegistrarId
+        ? domainDraft.registrars.map((r) => (r.id === editingRegistrarId ? regRecord : r))
+        : [...domainDraft.registrars, regRecord];
+      if (regRecord.isFeatured) {
+        nextRegistrars = nextRegistrars.map((r) => ({
+          ...r,
+          isFeatured: r.id === regRecord.id,
+        }));
+      }
+      const nextCfg: DomainAffiliateConfig = { ...domainDraft, registrars: nextRegistrars };
+      await siteAdsense.saveDomainAffiliateConfig(nextCfg);
+      setDomainDraft(nextCfg);
+      setDomainDirty(false);
+      resetRegistrarForm();
+      onNotify?.(
+        editingRegistrarId
+          ? `Partner afiliasi "${cleanName}" diperbarui.`
+          : `Partner afiliasi "${cleanName}" ditambahkan.`,
+        'success'
+      );
+    } catch (err) {
+      onNotify?.(err instanceof Error ? err.message : 'Gagal menyimpan partner afiliasi.', 'error');
+    } finally {
+      setDomainBusy(false);
+    }
+  };
+
+  const handleToggleRegistrarEnabled = async (reg: AffiliateRegistrarRecord) => {
+    setDomainBusy(true);
+    try {
+      const nextRegistrars = domainDraft.registrars.map((r) =>
+        r.id === reg.id ? { ...r, enabled: !r.enabled } : r
+      );
+      const nextCfg: DomainAffiliateConfig = { ...domainDraft, registrars: nextRegistrars };
+      await siteAdsense.saveDomainAffiliateConfig(nextCfg);
+      setDomainDraft(nextCfg);
+      setDomainDirty(false);
+      onNotify?.(
+        `${reg.name} ${!reg.enabled ? 'diaktifkan' : 'dinonaktifkan'}.`,
+        'success'
+      );
+    } catch (err) {
+      onNotify?.(err instanceof Error ? err.message : 'Gagal memperbarui partner.', 'error');
+    } finally {
+      setDomainBusy(false);
+    }
+  };
+
+  const handleSetFeaturedRegistrar = async (reg: AffiliateRegistrarRecord) => {
+    setDomainBusy(true);
+    try {
+      const nextRegistrars = domainDraft.registrars.map((r) => ({
+        ...r,
+        isFeatured: r.id === reg.id,
+        enabled: r.id === reg.id ? true : r.enabled,
+      }));
+      const nextCfg: DomainAffiliateConfig = { ...domainDraft, registrars: nextRegistrars };
+      await siteAdsense.saveDomainAffiliateConfig(nextCfg);
+      setDomainDraft(nextCfg);
+      setDomainDirty(false);
+      onNotify?.(`${reg.name} dijadikan partner rekomendasi utama.`, 'success');
+    } catch (err) {
+      onNotify?.(err instanceof Error ? err.message : 'Gagal mengatur partner utama.', 'error');
+    } finally {
+      setDomainBusy(false);
+    }
+  };
+
+  const handleDeleteRegistrar = async (reg: AffiliateRegistrarRecord) => {
+    setDomainBusy(true);
+    try {
+      const nextRegistrars = domainDraft.registrars.filter((r) => r.id !== reg.id);
+      const nextCfg: DomainAffiliateConfig = { ...domainDraft, registrars: nextRegistrars };
+      await siteAdsense.saveDomainAffiliateConfig(nextCfg);
+      setDomainDraft(nextCfg);
+      setDomainDirty(false);
+      if (editingRegistrarId === reg.id) resetRegistrarForm();
+      onNotify?.(`Partner "${reg.name}" dihapus.`, 'info');
+    } catch (err) {
+      onNotify?.(err instanceof Error ? err.message : 'Gagal menghapus partner.', 'error');
+    } finally {
+      setDomainBusy(false);
+    }
+  };
+
+  const handleAddTldPricingRule = (e: React.FormEvent) => {
+    e.preventDefault();
+    const cleanTld = normalizeTldValue(newTldInput);
+    if (!cleanTld) {
+      onNotify?.('Format ekstensi TLD tidak valid (contoh: .com, .id, .my.id).', 'error');
+      return;
+    }
+    const existing = domainDraft.tldPricing.some((p) => p.tld === cleanTld);
+    if (existing) {
+      onNotify?.(`Ekstensi ${cleanTld} sudah ada di daftar.`, 'info');
+      return;
+    }
+    const nextRule: DomainTldPricingRule = {
+      tld: cleanTld,
+      category: newTldCat,
+      registerPriceLabel: newTldRegPrice.trim() || '$9.98',
+      renewPriceLabel: newTldRenewPrice.trim(),
+      promoTag: newTldPromoTag.trim(),
+      enabled: true,
+    };
+    setDomainDraft((prev) => ({
+      ...prev,
+      tldPricing: [...prev.tldPricing, nextRule],
+    }));
+    setDomainDirty(true);
+    setNewTldInput('');
+    setNewTldRegPrice('');
+    setNewTldRenewPrice('');
+    setNewTldPromoTag('');
+  };
+
   const buildUnitHtmlSnippet = (unit: AdsenseUnitRecord) => {
     const pub = cleanPubPreview || 'ca-pub-0000000000000000';
     const slot = unit.slotId || '1234567890';
@@ -1753,6 +2056,7 @@ export const AdminAdsensePanel: React.FC<AdminAdsensePanelProps> = ({
                   ['d1', 'Cloudflare D1', Database],
                   ['gcloud', 'Google Cloud', Cloud],
                   ['freellm', 'FreeLLMAPI & AI', Zap],
+                  ['domain', 'Afiliasi Domain', Globe],
                   ['premium', 'Fitur Pro / Free', Crown],
                   ['payment', 'Pembayaran Manual', CreditCard],
                   ['seo', 'SEO Web & Blog', Search],
@@ -4374,6 +4678,949 @@ export const AdminAdsensePanel: React.FC<AdminAdsensePanelProps> = ({
                       </div>
                     )}
                   </section>
+                </section>
+              </div>
+            )}
+
+            {/* TAB DOMAIN & AFILIASI REGISTRAR KOMISI */}
+            {activeTab === 'domain' && (
+              <div className="space-y-5">
+                <div className="grid grid-cols-1 lg:grid-cols-12 gap-5 items-start">
+                  {/* Left: Global Domain Finder Settings */}
+                  <section className="lg:col-span-5 bg-white border border-slate-200 rounded-xl p-4 sm:p-5 space-y-4">
+                    <div className="flex items-start justify-between gap-2 pb-3 border-b border-slate-100">
+                      <div>
+                        <h2 className="text-sm font-bold text-slate-900">
+                          Pengaturan Pencari Domain &amp; Afiliasi
+                        </h2>
+                        <p className="text-[11px] text-slate-500">
+                          Atur judul halaman Cari Domain, ekstensi default, dan teks keterangan komisi partner.
+                        </p>
+                      </div>
+                      <label className="flex items-center gap-2 cursor-pointer shrink-0">
+                        <input
+                          type="checkbox"
+                          checked={domainDraft.enabled}
+                          onChange={(e) => {
+                            setDomainDraft((p) => ({ ...p, enabled: e.target.checked }));
+                            setDomainDirty(true);
+                          }}
+                          className="w-4 h-4 accent-blue-600 rounded"
+                        />
+                        <span className="text-xs font-semibold text-slate-900">
+                          {domainDraft.enabled ? 'Aktif' : 'Nonaktif'}
+                        </span>
+                      </label>
+                    </div>
+
+                    <div className="space-y-3">
+                      <div className="space-y-1">
+                        <label className="block text-xs font-semibold text-slate-800">
+                          Judul Hero Pencari Domain
+                        </label>
+                        <input
+                          type="text"
+                          value={domainDraft.headline}
+                          onChange={(e) => {
+                            setDomainDraft((p) => ({ ...p, headline: e.target.value }));
+                            setDomainDirty(true);
+                          }}
+                          className="w-full px-3 py-2 min-h-[40px] text-xs bg-slate-50 border border-slate-200 rounded-lg"
+                        />
+                      </div>
+
+                      <div className="space-y-1">
+                        <label className="block text-xs font-semibold text-slate-800">
+                          Subjudul / Penjelasan Singkat
+                        </label>
+                        <textarea
+                          rows={2}
+                          value={domainDraft.subtitle}
+                          onChange={(e) => {
+                            setDomainDraft((p) => ({ ...p, subtitle: e.target.value }));
+                            setDomainDirty(true);
+                          }}
+                          className="w-full px-3 py-2 text-xs bg-slate-50 border border-slate-200 rounded-lg"
+                        />
+                      </div>
+
+                      <div className="space-y-1">
+                        <label className="block text-xs font-semibold text-slate-800">
+                          Placeholder Kolom Pencarian
+                        </label>
+                        <input
+                          type="text"
+                          value={domainDraft.searchPlaceholder}
+                          onChange={(e) => {
+                            setDomainDraft((p) => ({ ...p, searchPlaceholder: e.target.value }));
+                            setDomainDirty(true);
+                          }}
+                          className="w-full px-3 py-2 min-h-[40px] text-xs bg-slate-50 border border-slate-200 rounded-lg"
+                        />
+                      </div>
+
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                        <div className="space-y-1">
+                          <label className="block text-xs font-semibold text-slate-800">
+                            Label Mata Uang Utama
+                          </label>
+                          <select
+                            value={domainDraft.currencyLabel}
+                            onChange={(e) => {
+                              setDomainDraft((p) => ({
+                                ...p,
+                                currencyLabel: e.target.value === 'IDR' ? 'IDR' : 'USD',
+                              }));
+                              setDomainDirty(true);
+                            }}
+                            className="w-full px-3 py-2 min-h-[40px] text-xs bg-slate-50 border border-slate-200 rounded-lg"
+                          >
+                            <option value="USD">USD ($)</option>
+                            <option value="IDR">IDR (Rupiah)</option>
+                          </select>
+                        </div>
+
+                        <div className="space-y-1">
+                          <label className="block text-xs font-semibold text-slate-800">
+                            Ekstensi Default (pisahkan koma)
+                          </label>
+                          <input
+                            type="text"
+                            value={domainDraft.defaultTlds.join(', ')}
+                            onChange={(e) => {
+                              const parsed = Array.from(
+                                new Set(
+                                  e.target.value
+                                    .split(/[,\s]+/)
+                                    .map((t) => normalizeTldValue(t))
+                                    .filter(Boolean)
+                                )
+                              ).slice(0, 14);
+                              setDomainDraft((p) => ({
+                                ...p,
+                                defaultTlds:
+                                  parsed.length > 0
+                                    ? parsed
+                                    : DEFAULT_DOMAIN_AFFILIATE_CONFIG.defaultTlds,
+                              }));
+                              setDomainDirty(true);
+                            }}
+                            placeholder=".com, .id, .my.id, .net"
+                            className="w-full px-3 py-2 min-h-[40px] text-xs font-mono bg-slate-50 border border-slate-200 rounded-lg"
+                          />
+                        </div>
+                      </div>
+
+                      <div className="space-y-1">
+                        <label className="block text-xs font-semibold text-slate-800">
+                          Teks Keterangan Komisi Afiliasi (Disclosure)
+                        </label>
+                        <textarea
+                          rows={2}
+                          value={domainDraft.disclosureText}
+                          onChange={(e) => {
+                            setDomainDraft((p) => ({ ...p, disclosureText: e.target.value }));
+                            setDomainDirty(true);
+                          }}
+                          className="w-full px-3 py-2 text-xs bg-slate-50 border border-slate-200 rounded-lg"
+                        />
+                      </div>
+                    </div>
+
+                    <div className="flex flex-wrap items-center gap-2">
+                      <button
+                        type="button"
+                        disabled={siteAdsense.savingConfig}
+                        onClick={() => void handleSaveDomainConfig()}
+                        className={`flex-1 flex items-center justify-center gap-2 px-4 py-2.5 min-h-[42px] text-xs font-semibold rounded-xl cursor-pointer disabled:opacity-60 ${
+                          domainDirty
+                            ? 'bg-emerald-600 hover:bg-emerald-700 text-white'
+                            : 'bg-slate-900 hover:bg-slate-800 text-white'
+                        }`}
+                      >
+                        {siteAdsense.savingConfig ? (
+                          <Loader2 className="w-4 h-4 animate-spin" />
+                        ) : (
+                          <Save className="w-4 h-4" />
+                        )}
+                        <span>
+                          {domainDirty
+                            ? 'Simpan Pengaturan & Harga TLD'
+                            : 'Pengaturan Domain Tersimpan'}
+                        </span>
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setDomainDraft({
+                            ...DEFAULT_DOMAIN_AFFILIATE_CONFIG,
+                            defaultTlds: [...DEFAULT_DOMAIN_AFFILIATE_CONFIG.defaultTlds],
+                            registrars: DEFAULT_DOMAIN_AFFILIATE_CONFIG.registrars.map((r) => ({
+                              ...r,
+                              supportedTlds: [...r.supportedTlds],
+                            })),
+                            tldPricing: DEFAULT_DOMAIN_AFFILIATE_CONFIG.tldPricing.map((p) => ({
+                              ...p,
+                            })),
+                          });
+                          setDomainDirty(true);
+                        }}
+                        className="px-3 py-2.5 min-h-[42px] text-xs font-semibold bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl cursor-pointer"
+                      >
+                        Reset Bawaan
+                      </button>
+                    </div>
+                  </section>
+
+                  {/* Right: Affiliate Commission Registrars CRUD */}
+                  <section className="lg:col-span-7 space-y-4">
+                    <form
+                      ref={registrarFormRef}
+                      onSubmit={(e) => void handleSaveRegistrar(e)}
+                      className="bg-white border border-slate-200 rounded-xl p-4 sm:p-5 space-y-3.5"
+                    >
+                      <div className="flex items-center justify-between gap-2 pb-2 border-b border-slate-100">
+                        <div>
+                          <h3 className="text-sm font-bold text-slate-900">
+                            {editingRegistrarId
+                              ? 'Edit Situs Partner Afiliasi Domain'
+                              : 'Tambah Situs / Registrar Komisi Afiliasi'}
+                          </h3>
+                          <p className="text-[11px] text-slate-500">
+                            Hanya menampilkan registrar yang aktif membayar komisi (Namecheap, Dynadot, Spaceship, Hover, NameSilo, DomaiNesia, Niagahoster, Rumahweb, IDCloudHost).
+                          </p>
+                        </div>
+                        {editingRegistrarId && (
+                          <button
+                            type="button"
+                            onClick={resetRegistrarForm}
+                            className="px-2.5 py-1.5 text-[11px] font-semibold bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg cursor-pointer"
+                          >
+                            Batal Edit
+                          </button>
+                        )}
+                      </div>
+
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                        <div className="space-y-1">
+                          <label className="block text-xs font-semibold text-slate-800">
+                            Nama Situs / Registrar
+                          </label>
+                          <input
+                            type="text"
+                            value={regName}
+                            onChange={(e) => setRegName(e.target.value)}
+                            placeholder="Contoh: Namecheap, DomaiNesia"
+                            className="w-full px-3 py-2 min-h-[40px] text-xs bg-slate-50 border border-slate-200 rounded-lg"
+                          />
+                        </div>
+
+                        <div className="space-y-1">
+                          <label className="block text-xs font-semibold text-slate-800">
+                            ID Afiliasi / Ref Code (Opsional)
+                          </label>
+                          <input
+                            type="text"
+                            value={regAffiliateId}
+                            onChange={(e) => setRegAffiliateId(e.target.value)}
+                            placeholder="Misal: aff_temaloka123"
+                            className="w-full px-3 py-2 min-h-[40px] text-xs font-mono bg-slate-50 border border-slate-200 rounded-lg"
+                          />
+                        </div>
+                      </div>
+
+                      <div className="space-y-1">
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                          <label className="block text-xs font-semibold text-slate-800">
+                            Template URL Afiliasi Domain
+                          </label>
+                          <div className="flex items-center gap-1 text-[10px]">
+                            {['{domain}', '{sld}', '{tld}', '{affId}'].map((tok) => (
+                              <button
+                                key={tok}
+                                type="button"
+                                onClick={() => setRegTemplateUrl((prev) => `${prev}${tok}`)}
+                                className="px-1.5 py-0.5 font-mono bg-slate-100 hover:bg-slate-200 text-slate-700 rounded cursor-pointer"
+                              >
+                                +{tok}
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+                        <input
+                          type="text"
+                          value={regTemplateUrl}
+                          onChange={(e) => setRegTemplateUrl(e.target.value)}
+                          placeholder="https://www.namecheap.com/domains/registration/results/?domain={domain}&aff={affId}"
+                          className="w-full px-3 py-2 min-h-[40px] text-xs font-mono bg-slate-50 border border-slate-200 rounded-lg"
+                        />
+                        {regTemplateUrl.trim() && (
+                          <div className="text-[11px] font-mono text-emerald-700 break-all">
+                            Pratinjau Link (contohblog.com):{' '}
+                            {buildAffiliateDomainUrl(
+                              {
+                                affiliateUrlTemplate: regTemplateUrl,
+                                websiteUrl: regWebsiteUrl,
+                                affiliateId: regAffiliateId,
+                              },
+                              'contohblog.com'
+                            ) || '(URL belum valid, pastikan diawali https://)'}
+                          </div>
+                        )}
+                      </div>
+
+                      <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
+                        <div className="space-y-1">
+                          <label className="block text-xs font-semibold text-slate-800">
+                            URL Website Utama
+                          </label>
+                          <input
+                            type="url"
+                            value={regWebsiteUrl}
+                            onChange={(e) => setRegWebsiteUrl(e.target.value)}
+                            placeholder="https://www.namecheap.com/"
+                            className="w-full px-3 py-2 min-h-[40px] text-xs font-mono bg-slate-50 border border-slate-200 rounded-lg"
+                          />
+                        </div>
+
+                        <div className="space-y-1">
+                          <label className="block text-xs font-semibold text-slate-800">
+                            Kode Promo (Opsional)
+                          </label>
+                          <input
+                            type="text"
+                            value={regPromoCode}
+                            onChange={(e) => setRegPromoCode(e.target.value)}
+                            placeholder="NEWCOM598"
+                            className="w-full px-3 py-2 min-h-[40px] text-xs font-mono bg-slate-50 border border-slate-200 rounded-lg"
+                          />
+                        </div>
+
+                        <div className="space-y-1">
+                          <label className="block text-xs font-semibold text-slate-800">
+                            Label Rekomendasi
+                          </label>
+                          <input
+                            type="text"
+                            value={regBadgeLabel}
+                            onChange={(e) => setRegBadgeLabel(e.target.value)}
+                            placeholder="Komisi 30% / Lokal .ID"
+                            className="w-full px-3 py-2 min-h-[40px] text-xs bg-slate-50 border border-slate-200 rounded-lg"
+                          />
+                        </div>
+                      </div>
+
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                        <div className="space-y-1">
+                          <label className="block text-xs font-semibold text-slate-800">
+                            Info Rate Komisi / Catatan Partner
+                          </label>
+                          <input
+                            type="text"
+                            value={regCommissionNote}
+                            onChange={(e) => setRegCommissionNote(e.target.value)}
+                            placeholder="Komisi hingga 20% - 35% per registrasi domain baru"
+                            className="w-full px-3 py-2 min-h-[40px] text-xs bg-slate-50 border border-slate-200 rounded-lg"
+                          />
+                        </div>
+
+                        <div className="space-y-1">
+                          <label className="block text-xs font-semibold text-slate-800">
+                            Ekstensi Khusus (kosongkan = semua)
+                          </label>
+                          <input
+                            type="text"
+                            value={regSupportedTldsText}
+                            onChange={(e) => setRegSupportedTldsText(e.target.value)}
+                            placeholder=".id, .my.id, .co.id"
+                            className="w-full px-3 py-2 min-h-[40px] text-xs font-mono bg-slate-50 border border-slate-200 rounded-lg"
+                          />
+                        </div>
+                      </div>
+
+                      <div className="flex flex-wrap items-center justify-between gap-3 pt-1">
+                        <div className="flex flex-wrap items-center gap-4">
+                          <label className="flex items-center gap-2 text-xs font-semibold text-slate-800 cursor-pointer">
+                            <input
+                              type="checkbox"
+                              checked={regIsFeatured}
+                              onChange={(e) => setRegIsFeatured(e.target.checked)}
+                              className="w-4 h-4 accent-blue-600 rounded"
+                            />
+                            <span>Jadikan Partner Utama Default</span>
+                          </label>
+
+                          <label className="flex items-center gap-2 text-xs font-semibold text-slate-800 cursor-pointer">
+                            <input
+                              type="checkbox"
+                              checked={regEnabled}
+                              onChange={(e) => setRegEnabled(e.target.checked)}
+                              className="w-4 h-4 accent-emerald-600 rounded"
+                            />
+                            <span>Aktifkan di Halaman Cari Domain</span>
+                          </label>
+                        </div>
+
+                        <button
+                          type="submit"
+                          disabled={domainBusy}
+                          className="flex items-center gap-1.5 px-4 py-2 min-h-[40px] text-xs font-semibold bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white rounded-xl cursor-pointer"
+                        >
+                          {domainBusy ? (
+                            <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                          ) : (
+                            <PlusCircle className="w-3.5 h-3.5" />
+                          )}
+                          <span>
+                            {editingRegistrarId ? 'Simpan Perubahan Partner' : 'Tambah Partner Afiliasi'}
+                          </span>
+                        </button>
+                      </div>
+                    </form>
+
+                    {/* List of Affiliate Registrars */}
+                    <section className="bg-white border border-slate-200 rounded-xl p-4 sm:p-5 space-y-3">
+                      <div className="flex items-center justify-between gap-2 pb-2 border-b border-slate-100">
+                        <h3 className="text-sm font-bold text-slate-900">
+                          Daftar Situs Partner Komisi Afiliasi ({domainDraft.registrars.length})
+                        </h3>
+                        <span className="text-[11px] text-slate-500">
+                          {domainDraft.registrars.filter((r) => r.enabled).length} aktif tampil ke pengunjung
+                        </span>
+                      </div>
+
+                      <div className="space-y-2.5">
+                        {domainDraft.registrars.map((reg) => {
+                          const previewHref = buildAffiliateDomainUrl(reg, 'contohblog.com');
+                          const guide = findRegistrarSignupGuide(reg.id, reg.name);
+                          const isInlineOpen = inlineRowGuideId === reg.id;
+                          const safeSignupHref = guide
+                            ? sanitizePublicHttpUrl(guide.signupUrl)
+                            : '';
+
+                          return (
+                            <div
+                              key={reg.id}
+                              className={`p-3 rounded-xl border space-y-2 ${
+                                reg.enabled
+                                  ? reg.isFeatured
+                                    ? 'bg-blue-50/50 border-blue-200'
+                                    : 'bg-slate-50/70 border-slate-200'
+                                  : 'bg-slate-100/70 border-slate-200 opacity-75'
+                              }`}
+                            >
+                              <div className="flex flex-wrap items-start justify-between gap-2">
+                                <div className="min-w-0 space-y-0.5">
+                                  <div className="flex items-center gap-2 flex-wrap">
+                                    <span className="text-xs font-bold text-slate-900">
+                                      {reg.name}
+                                    </span>
+                                    {reg.isFeatured && (
+                                      <span className="text-[10px] font-bold text-blue-700">
+                                        · Partner Utama
+                                      </span>
+                                    )}
+                                    {reg.badgeLabel && (
+                                      <span className="text-[10px] font-semibold text-slate-600">
+                                        · {reg.badgeLabel}
+                                      </span>
+                                    )}
+                                    <span
+                                      className={`text-[10px] font-bold ${
+                                        reg.enabled ? 'text-emerald-700' : 'text-slate-500'
+                                      }`}
+                                    >
+                                      · {reg.enabled ? 'Aktif' : 'Nonaktif'}
+                                    </span>
+                                    {reg.affiliateId ? (
+                                      <span className="text-[10px] font-semibold text-emerald-700">
+                                        · ID Terpasang
+                                      </span>
+                                    ) : (
+                                      <span className="text-[10px] font-semibold text-amber-700">
+                                        · Belum Ada ID Afiliasi
+                                      </span>
+                                    )}
+                                  </div>
+                                  {reg.commissionNote && (
+                                    <div className="text-[11px] text-slate-600">
+                                      {reg.commissionNote}
+                                    </div>
+                                  )}
+                                  <div className="text-[11px] font-mono text-slate-500 break-all">
+                                    {reg.affiliateUrlTemplate || reg.websiteUrl}
+                                    {reg.affiliateId ? ` · ID: ${reg.affiliateId}` : ''}
+                                    {reg.promoCode ? ` · Promo: ${reg.promoCode}` : ''}
+                                  </div>
+                                </div>
+
+                                <div className="flex flex-wrap items-center gap-1.5 shrink-0">
+                                  {guide && (
+                                    <button
+                                      type="button"
+                                      onClick={() =>
+                                        setInlineRowGuideId(isInlineOpen ? null : reg.id)
+                                      }
+                                      className={`px-2.5 py-1.5 text-[11px] font-semibold border rounded-lg cursor-pointer inline-flex items-center gap-1 ${
+                                        isInlineOpen
+                                          ? 'bg-blue-600 text-white border-blue-600'
+                                          : 'bg-white border-slate-200 text-blue-700 hover:bg-blue-50'
+                                      }`}
+                                    >
+                                      <BookOpen className="w-3 h-3" />
+                                      <span>{isInlineOpen ? 'Tutup Panduan' : 'Cara Daftar'}</span>
+                                    </button>
+                                  )}
+                                  {!reg.isFeatured && (
+                                    <button
+                                      type="button"
+                                      disabled={domainBusy}
+                                      onClick={() => void handleSetFeaturedRegistrar(reg)}
+                                      className="px-2.5 py-1.5 text-[11px] font-semibold bg-white border border-slate-200 hover:bg-blue-50 hover:text-blue-700 rounded-lg cursor-pointer"
+                                    >
+                                      Set Utama
+                                    </button>
+                                  )}
+                                  <button
+                                    type="button"
+                                    disabled={domainBusy}
+                                    onClick={() => void handleToggleRegistrarEnabled(reg)}
+                                    className="px-2.5 py-1.5 text-[11px] font-semibold bg-white border border-slate-200 hover:bg-slate-100 rounded-lg cursor-pointer"
+                                  >
+                                    {reg.enabled ? 'Nonaktifkan' : 'Aktifkan'}
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() => startEditRegistrar(reg)}
+                                    className="px-2.5 py-1.5 text-[11px] font-semibold bg-white border border-slate-200 hover:bg-slate-100 rounded-lg cursor-pointer"
+                                  >
+                                    Edit
+                                  </button>
+                                  {previewHref && (
+                                    <a
+                                      href={previewHref}
+                                      target="_blank"
+                                      rel="noopener noreferrer"
+                                      title="Uji buka link afiliasi"
+                                      className="p-1.5 text-slate-500 hover:text-blue-700 bg-white border border-slate-200 rounded-lg"
+                                    >
+                                      <ExternalLink className="w-3.5 h-3.5" />
+                                    </a>
+                                  )}
+                                  <button
+                                    type="button"
+                                    disabled={domainBusy}
+                                    onClick={() => void handleDeleteRegistrar(reg)}
+                                    aria-label={`Hapus ${reg.name}`}
+                                    className="p-1.5 text-slate-400 hover:text-rose-600 bg-white border border-slate-200 rounded-lg cursor-pointer"
+                                  >
+                                    <Trash2 className="w-3.5 h-3.5" />
+                                  </button>
+                                </div>
+                              </div>
+
+                              {isInlineOpen && guide && (
+                                <div className="pt-2.5 mt-1 border-t border-slate-200 bg-white rounded-lg p-3 space-y-2">
+                                  <div className="flex flex-wrap items-center justify-between gap-2 text-[11px]">
+                                    <span className="font-bold text-slate-900">
+                                      Jalur Pendaftaran: {guide.platform}
+                                    </span>
+                                    <span className="text-slate-500">{guide.payoutInfo}</span>
+                                  </div>
+                                  <ol className="space-y-1.5 text-[11px] text-slate-700">
+                                    {guide.steps.map((step, sIdx) => (
+                                      <li key={sIdx} className="flex items-start gap-2">
+                                        <span className="w-4 h-4 rounded bg-blue-50 text-blue-700 font-bold text-[10px] flex items-center justify-center shrink-0 mt-0.5">
+                                          {sIdx + 1}
+                                        </span>
+                                        <span>{step}</span>
+                                      </li>
+                                    ))}
+                                  </ol>
+                                  <div className="flex flex-wrap items-center gap-2 pt-1">
+                                    {safeSignupHref && (
+                                      <a
+                                        href={safeSignupHref}
+                                        target="_blank"
+                                        rel="noopener noreferrer"
+                                        className="inline-flex items-center gap-1.5 px-3 py-1.5 text-[11px] font-semibold bg-slate-900 hover:bg-slate-800 text-white rounded-lg"
+                                      >
+                                        <span>Buka Halaman Daftar {guide.name}</span>
+                                        <ExternalLink className="w-3 h-3" />
+                                      </a>
+                                    )}
+                                    <button
+                                      type="button"
+                                      onClick={() => applyRegistrarGuideToForm(guide)}
+                                      className="px-3 py-1.5 text-[11px] font-semibold bg-blue-50 hover:bg-blue-100 text-blue-700 border border-blue-200 rounded-lg cursor-pointer"
+                                    >
+                                      Pakai Template Link &amp; Edit
+                                    </button>
+                                  </div>
+                                </div>
+                              )}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </section>
+                  </section>
+                </div>
+
+                {/* Step-by-Step Affiliate Signup Guide Per Commission Registrar */}
+                <section className="bg-white border border-slate-200 rounded-xl p-4 sm:p-5 space-y-4">
+                  <div className="flex flex-wrap items-start justify-between gap-2 pb-3 border-b border-slate-100">
+                    <div>
+                      <h3 className="text-sm font-bold text-slate-900 flex items-center gap-2">
+                        <BookOpen className="w-4 h-4 text-blue-600" />
+                        <span>Panduan Cara Daftar Afiliasi Per Situs (Satu per Satu)</span>
+                      </h3>
+                      <p className="text-[11px] text-slate-500 mt-0.5">
+                        Daftar ke program afiliasi masing-masing situs di bawah untuk mendapatkan ID Afiliasi atau tracking link resmi agar setiap pembelian domain menghasilkan komisi.
+                      </p>
+                    </div>
+                    <span className="text-[11px] font-semibold text-slate-600">
+                      {Object.keys(REGISTRAR_SIGNUP_GUIDES).length} Situs Komisi Aktif
+                    </span>
+                  </div>
+
+                  <div className="space-y-2.5">
+                    {Object.values(REGISTRAR_SIGNUP_GUIDES).map((guide, index) => {
+                      const isExpanded = expandedGuideId === guide.id;
+                      const safeUrl = sanitizePublicHttpUrl(guide.signupUrl);
+                      const configuredPartner = domainDraft.registrars.find(
+                        (r) =>
+                          r.id.toLowerCase() === guide.id.toLowerCase() ||
+                          r.name.toLowerCase().includes(guide.id.toLowerCase())
+                      );
+                      const hasAffiliateId = Boolean(configuredPartner?.affiliateId?.trim());
+
+                      return (
+                        <div
+                          key={guide.id}
+                          className={`border rounded-xl transition-colors ${
+                            isExpanded
+                              ? 'border-blue-300 bg-blue-50/20'
+                              : 'border-slate-200 bg-slate-50/40'
+                          }`}
+                        >
+                          <button
+                            type="button"
+                            onClick={() =>
+                              setExpandedGuideId(isExpanded ? null : guide.id)
+                            }
+                            className="w-full px-4 py-3 flex flex-wrap items-center justify-between gap-2 text-left cursor-pointer"
+                          >
+                            <div className="flex items-center gap-3 min-w-0">
+                              <span className="w-6 h-6 rounded-lg bg-slate-900 text-white text-[11px] font-bold flex items-center justify-center shrink-0">
+                                {index + 1}
+                              </span>
+                              <div className="min-w-0">
+                                <div className="flex items-center gap-2 flex-wrap">
+                                  <span className="text-xs font-bold text-slate-900">
+                                    {guide.name}
+                                  </span>
+                                  <span className="text-[11px] text-slate-500">
+                                    · {guide.platform}
+                                  </span>
+                                  {hasAffiliateId ? (
+                                    <span className="text-[10px] font-bold text-emerald-700">
+                                      · ID Terisi ({configuredPartner?.affiliateId})
+                                    </span>
+                                  ) : (
+                                    <span className="text-[10px] font-semibold text-amber-700">
+                                      · Belum Diisi ID
+                                    </span>
+                                  )}
+                                </div>
+                                <div className="text-[11px] text-slate-600 truncate">
+                                  {guide.commissionSummary}
+                                </div>
+                              </div>
+                            </div>
+                            <span className="text-slate-500 shrink-0">
+                              {isExpanded ? (
+                                <ChevronUp className="w-4 h-4" />
+                              ) : (
+                                <ChevronDown className="w-4 h-4" />
+                              )}
+                            </span>
+                          </button>
+
+                          {isExpanded && (
+                            <div className="px-4 pb-4 pt-3 border-t border-slate-200 bg-white rounded-b-xl space-y-3">
+                              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 text-[11px]">
+                                <div className="p-2.5 rounded-lg bg-slate-50 border border-slate-200">
+                                  <div className="font-bold text-slate-800">Komisi &amp; Cookie</div>
+                                  <div className="text-slate-600 mt-0.5">
+                                    {guide.commissionSummary}
+                                  </div>
+                                </div>
+                                <div className="p-2.5 rounded-lg bg-slate-50 border border-slate-200">
+                                  <div className="font-bold text-slate-800">Jadwal &amp; Metode Pencairan</div>
+                                  <div className="text-slate-600 mt-0.5">{guide.payoutInfo}</div>
+                                </div>
+                              </div>
+
+                              <div className="space-y-1.5">
+                                <div className="text-[11px] font-bold text-slate-800">
+                                  Langkah Pendaftaran {guide.name}:
+                                </div>
+                                <ol className="space-y-2 text-xs text-slate-700">
+                                  {guide.steps.map((step, stepIdx) => (
+                                    <li key={stepIdx} className="flex items-start gap-2.5">
+                                      <span className="w-5 h-5 rounded-md bg-blue-600 text-white text-[11px] font-bold flex items-center justify-center shrink-0 mt-0.5">
+                                        {stepIdx + 1}
+                                      </span>
+                                      <span className="leading-relaxed">{step}</span>
+                                    </li>
+                                  ))}
+                                </ol>
+                              </div>
+
+                              <div className="p-2.5 rounded-lg bg-slate-50 border border-slate-200 space-y-1">
+                                <div className="text-[10px] font-bold text-slate-600 uppercase">
+                                  Rekomendasi Template URL Afiliasi
+                                </div>
+                                <div className="text-[11px] font-mono text-slate-800 break-all">
+                                  {guide.recommendedTemplate}
+                                </div>
+                              </div>
+
+                              <div className="flex flex-wrap items-center gap-2 pt-1">
+                                {safeUrl && (
+                                  <a
+                                    href={safeUrl}
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    className="inline-flex items-center gap-1.5 px-3.5 py-2 min-h-[38px] text-xs font-semibold bg-slate-900 hover:bg-slate-800 text-white rounded-lg"
+                                  >
+                                    <span>Daftar di {guide.name}</span>
+                                    <ExternalLink className="w-3.5 h-3.5" />
+                                  </a>
+                                )}
+                                <button
+                                  type="button"
+                                  onClick={() => applyRegistrarGuideToForm(guide)}
+                                  className="inline-flex items-center gap-1.5 px-3.5 py-2 min-h-[38px] text-xs font-semibold bg-blue-600 hover:bg-blue-700 text-white rounded-lg cursor-pointer"
+                                >
+                                  <span>Terapkan ke Form Edit di Atas</span>
+                                </button>
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                </section>
+
+                {/* Editable TLD Pricing & Promo Table */}
+                <section className="bg-white border border-slate-200 rounded-xl p-4 sm:p-5 space-y-4">
+                  <div className="flex flex-wrap items-center justify-between gap-2 pb-2 border-b border-slate-100">
+                    <div>
+                      <h3 className="text-sm font-bold text-slate-900">
+                        Daftar Harga &amp; Promo Ekstensi Domain ({domainDraft.tldPricing.length})
+                      </h3>
+                      <p className="text-[11px] text-slate-500">
+                        Sesuaikan tampilan harga registrasi &amp; perpanjangan yang ditampilkan di halaman Cari Domain agar sinkron dengan komisi partner Anda. Jangan lupa klik &ldquo;Simpan Pengaturan &amp; Harga TLD&rdquo;.
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      disabled={siteAdsense.savingConfig}
+                      onClick={() => void handleSaveDomainConfig()}
+                      className={`px-4 py-2 min-h-[38px] text-xs font-semibold rounded-lg flex items-center gap-1.5 cursor-pointer ${
+                        domainDirty
+                          ? 'bg-emerald-600 hover:bg-emerald-700 text-white'
+                          : 'bg-slate-900 hover:bg-slate-800 text-white'
+                      }`}
+                    >
+                      <Save className="w-3.5 h-3.5" />
+                      <span>Simpan Tabel Harga TLD</span>
+                    </button>
+                  </div>
+
+                  <form
+                    onSubmit={handleAddTldPricingRule}
+                    className="grid grid-cols-2 sm:grid-cols-6 gap-2 p-3 rounded-xl bg-slate-50 border border-slate-200"
+                  >
+                    <input
+                      type="text"
+                      value={newTldInput}
+                      onChange={(e) => setNewTldInput(e.target.value)}
+                      placeholder=".app / .co"
+                      className="px-2.5 py-2 min-h-[38px] text-xs font-mono bg-white border border-slate-200 rounded-lg"
+                    />
+                    <select
+                      value={newTldCat}
+                      onChange={(e) => setNewTldCat(e.target.value as DomainTldCategory)}
+                      className="px-2.5 py-2 min-h-[38px] text-xs bg-white border border-slate-200 rounded-lg"
+                    >
+                      <option value="populer">Populer</option>
+                      <option value="indonesia">Indonesia (.id)</option>
+                      <option value="tech">Tech &amp; AI</option>
+                      <option value="bisnis">Bisnis</option>
+                    </select>
+                    <input
+                      type="text"
+                      value={newTldRegPrice}
+                      onChange={(e) => setNewTldRegPrice(e.target.value)}
+                      placeholder="Harga Daftar ($14)"
+                      className="px-2.5 py-2 min-h-[38px] text-xs font-mono bg-white border border-slate-200 rounded-lg"
+                    />
+                    <input
+                      type="text"
+                      value={newTldRenewPrice}
+                      onChange={(e) => setNewTldRenewPrice(e.target.value)}
+                      placeholder="Renew ($18/thn)"
+                      className="px-2.5 py-2 min-h-[38px] text-xs font-mono bg-white border border-slate-200 rounded-lg"
+                    />
+                    <input
+                      type="text"
+                      value={newTldPromoTag}
+                      onChange={(e) => setNewTldPromoTag(e.target.value)}
+                      placeholder="Label Promo"
+                      className="px-2.5 py-2 min-h-[38px] text-xs bg-white border border-slate-200 rounded-lg"
+                    />
+                    <button
+                      type="submit"
+                      className="px-3 py-2 min-h-[38px] text-xs font-semibold bg-blue-600 hover:bg-blue-700 text-white rounded-lg cursor-pointer"
+                    >
+                      + Tambah TLD
+                    </button>
+                  </form>
+
+                  <div className="overflow-x-auto border border-slate-200 rounded-xl">
+                    <table className="w-full text-left text-xs">
+                      <thead className="bg-slate-50 border-b border-slate-200 text-[11px] font-semibold text-slate-600">
+                        <tr>
+                          <th className="px-3 py-2.5">Ekstensi</th>
+                          <th className="px-3 py-2.5">Kategori</th>
+                          <th className="px-3 py-2.5">Harga Daftar</th>
+                          <th className="px-3 py-2.5">Perpanjangan</th>
+                          <th className="px-3 py-2.5">Label Promo</th>
+                          <th className="px-3 py-2.5 text-center">Aktif</th>
+                          <th className="px-3 py-2.5 text-right">Hapus</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-100">
+                        {domainDraft.tldPricing.map((rule, idx) => (
+                          <tr key={rule.tld} className="hover:bg-slate-50/70">
+                            <td className="px-3 py-2 font-mono font-bold text-slate-900">
+                              {rule.tld}
+                            </td>
+                            <td className="px-3 py-2">
+                              <select
+                                value={rule.category}
+                                onChange={(e) => {
+                                  const cat = e.target.value as DomainTldCategory;
+                                  setDomainDraft((prev) => ({
+                                    ...prev,
+                                    tldPricing: prev.tldPricing.map((item, i) =>
+                                      i === idx ? { ...item, category: cat } : item
+                                    ),
+                                  }));
+                                  setDomainDirty(true);
+                                }}
+                                className="px-2 py-1 text-xs bg-white border border-slate-200 rounded"
+                              >
+                                <option value="populer">Populer</option>
+                                <option value="indonesia">Indonesia</option>
+                                <option value="tech">Tech &amp; AI</option>
+                                <option value="bisnis">Bisnis</option>
+                              </select>
+                            </td>
+                            <td className="px-3 py-2">
+                              <input
+                                type="text"
+                                value={rule.registerPriceLabel}
+                                onChange={(e) => {
+                                  const val = e.target.value;
+                                  setDomainDraft((prev) => ({
+                                    ...prev,
+                                    tldPricing: prev.tldPricing.map((item, i) =>
+                                      i === idx ? { ...item, registerPriceLabel: val } : item
+                                    ),
+                                  }));
+                                  setDomainDirty(true);
+                                }}
+                                className="w-28 px-2 py-1 text-xs font-mono tabular-nums bg-white border border-slate-200 rounded"
+                              />
+                            </td>
+                            <td className="px-3 py-2">
+                              <input
+                                type="text"
+                                value={rule.renewPriceLabel}
+                                onChange={(e) => {
+                                  const val = e.target.value;
+                                  setDomainDraft((prev) => ({
+                                    ...prev,
+                                    tldPricing: prev.tldPricing.map((item, i) =>
+                                      i === idx ? { ...item, renewPriceLabel: val } : item
+                                    ),
+                                  }));
+                                  setDomainDirty(true);
+                                }}
+                                className="w-32 px-2 py-1 text-xs font-mono tabular-nums bg-white border border-slate-200 rounded"
+                              />
+                            </td>
+                            <td className="px-3 py-2">
+                              <input
+                                type="text"
+                                value={rule.promoTag}
+                                onChange={(e) => {
+                                  const val = e.target.value;
+                                  setDomainDraft((prev) => ({
+                                    ...prev,
+                                    tldPricing: prev.tldPricing.map((item, i) =>
+                                      i === idx ? { ...item, promoTag: val } : item
+                                    ),
+                                  }));
+                                  setDomainDirty(true);
+                                }}
+                                className="w-32 px-2 py-1 text-xs bg-white border border-slate-200 rounded"
+                              />
+                            </td>
+                            <td className="px-3 py-2 text-center">
+                              <input
+                                type="checkbox"
+                                checked={rule.enabled}
+                                onChange={(e) => {
+                                  const checked = e.target.checked;
+                                  setDomainDraft((prev) => ({
+                                    ...prev,
+                                    tldPricing: prev.tldPricing.map((item, i) =>
+                                      i === idx ? { ...item, enabled: checked } : item
+                                    ),
+                                  }));
+                                  setDomainDirty(true);
+                                }}
+                                className="w-4 h-4 accent-blue-600 rounded"
+                              />
+                            </td>
+                            <td className="px-3 py-2 text-right">
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setDomainDraft((prev) => ({
+                                    ...prev,
+                                    tldPricing: prev.tldPricing.filter((_, i) => i !== idx),
+                                  }));
+                                  setDomainDirty(true);
+                                }}
+                                aria-label={`Hapus ${rule.tld}`}
+                                className="p-1 text-slate-400 hover:text-rose-600 cursor-pointer"
+                              >
+                                <Trash2 className="w-3.5 h-3.5" />
+                              </button>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
                 </section>
               </div>
             )}

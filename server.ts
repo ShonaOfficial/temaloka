@@ -15,6 +15,7 @@ import {
   getActiveDbMode,
   getAdminAuthStatus,
   getD1AdminConfigView,
+  getDomainAffiliateConfig,
   getPaymentSettingsConfig,
   getPremiumSettingsConfig,
   getSessionUserByClaims,
@@ -26,6 +27,7 @@ import {
   listManagedUsers,
   loadStoredD1Credentials,
   registerAppUser,
+  saveDomainAffiliateConfig,
   savePaymentSettingsConfig,
   savePremiumSettingsConfig,
   saveSiteAdsenseConfig,
@@ -57,6 +59,7 @@ import {
   toGoogleCloudAdminView,
   warmGoogleCloudConfigCache,
 } from './src/server/googleCloudService.ts';
+import { checkDomainAvailabilityBatch } from './src/server/domainLookupService.ts';
 import { FREELLM_MODELS } from './src/lib/aiEngineCatalog.ts';
 import {
   ADSENSE_FIELD_LIMITS,
@@ -791,15 +794,17 @@ app.get('/api/config/public', async (req, res) => {
   try {
     const optionalUser = await resolveOptionalUser(req);
     const isAdmin = optionalUser?.role === 'admin';
-    const [adsense, units, seo, premium, payment, freellmCfg, gcloudCfg] = await Promise.all([
-      getSiteAdsenseConfig(),
-      listAdsenseUnits(!isAdmin),
-      getSiteSeoConfig(),
-      getPremiumSettingsConfig(),
-      getPaymentSettingsConfig(),
-      loadFreeLlmConfig(),
-      loadGoogleCloudConfig(),
-    ]);
+    const [adsense, units, seo, premium, payment, domainAffiliate, freellmCfg, gcloudCfg] =
+      await Promise.all([
+        getSiteAdsenseConfig(),
+        listAdsenseUnits(!isAdmin),
+        getSiteSeoConfig(),
+        getPremiumSettingsConfig(),
+        getPaymentSettingsConfig(),
+        getDomainAffiliateConfig(),
+        loadFreeLlmConfig(),
+        loadGoogleCloudConfig(),
+      ]);
 
     res.json({
       dbMode: getActiveDbMode(),
@@ -808,6 +813,7 @@ app.get('/api/config/public', async (req, res) => {
       seo,
       premium,
       payment,
+      domainAffiliate,
       freellm: getFreeLlmPublicStatus(freellmCfg),
       gcloud: getGoogleCloudPublicStatus(gcloudCfg),
     });
@@ -970,6 +976,48 @@ app.put('/api/admin/payment', async (req, res) => {
   } catch (err) {
     res.status(400).json({
       error: err instanceof Error ? err.message : 'Gagal menyimpan pengaturan Alat Pembayaran Manual.',
+    });
+  }
+});
+
+app.put('/api/admin/domain-affiliate', async (req, res) => {
+  try {
+    const admin = await requireAdminSession(req, res);
+    if (!admin) return;
+    const domainAffiliate = await saveDomainAffiliateConfig(req.body || {}, admin.email);
+    res.json({ domainAffiliate });
+  } catch (err) {
+    res.status(400).json({
+      error:
+        err instanceof Error
+          ? err.message
+          : 'Gagal menyimpan pengaturan Afiliasi & Registrar Domain.',
+    });
+  }
+});
+
+app.post('/api/domain/check', async (req, res) => {
+  try {
+    const query = typeof req.body?.query === 'string' ? req.body.query.trim().slice(0, 120) : '';
+    if (!query) {
+      res.status(400).json({ error: 'Masukkan nama domain atau kata kunci terlebih dahulu.' });
+      return;
+    }
+    const cfg = await getDomainAffiliateConfig();
+    const requestedTlds = Array.isArray(req.body?.tlds)
+      ? req.body.tlds.filter((t: unknown): t is string => typeof t === 'string').slice(0, 16)
+      : cfg.defaultTlds;
+    const includeSuggestions = req.body?.includeSuggestions !== false;
+
+    const result = await checkDomainAvailabilityBatch({
+      query,
+      tlds: requestedTlds,
+      includeSuggestions,
+    });
+    res.json(result);
+  } catch (err) {
+    res.status(400).json({
+      error: err instanceof Error ? err.message : 'Gagal memeriksa ketersediaan domain.',
     });
   }
 });

@@ -70,7 +70,6 @@ interface UrlConsoleViewProps {
     comparison: TemplateMatchComparison,
     visualHtml?: string | null
   ) => void;
-  onOpenUserBlogPreview?: () => void;
   previewConsoleLogs: DevConsoleLogEntry[];
   onClearPreviewLogs: () => void;
   pendingConsolePayload?: PendingConsoleInjection | null;
@@ -235,7 +234,6 @@ export const UrlConsoleView: React.FC<UrlConsoleViewProps> = ({
   comparisonResult,
   userBlogVisualHtml,
   onBlogFingerprintFetched,
-  onOpenUserBlogPreview,
   previewConsoleLogs,
   onClearPreviewLogs,
   pendingConsolePayload,
@@ -1611,16 +1609,6 @@ export const UrlConsoleView: React.FC<UrlConsoleViewProps> = ({
               <RefreshCw className="w-3.5 h-3.5" />
               <span>Audit XML ke Konsol</span>
             </button>
-            {userBlogVisualHtml && onOpenUserBlogPreview && (
-              <button
-                type="button"
-                onClick={onOpenUserBlogPreview}
-                className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium bg-slate-900 hover:bg-slate-800 text-white rounded-lg cursor-pointer"
-              >
-                <ArrowUpRight className="w-3.5 h-3.5" />
-                <span>Lihat Iframe URL</span>
-              </button>
-            )}
           </div>
         </div>
 

@@ -50,7 +50,7 @@ interface XmlSplitterMergerViewProps {
   onApplyMergedXml: (
     nextXml: string,
     label: string,
-    openView?: 'preview' | 'editor'
+    openView?: 'layout' | 'editor'
   ) => void;
   onNotify: (message: string, type?: 'success' | 'error' | 'info') => void;
 }
@@ -1072,7 +1072,7 @@ export const XmlSplitterMergerView: React.FC<XmlSplitterMergerViewProps> = ({
                     Penyatu XML (Gabungkan Pecahan atau Modul Template Blogger)
                   </h2>
                   <p className="text-xs text-slate-500 mt-0.5">
-                    Unggah banyak file <span className="font-mono">.xml</span> atau tempel fragmen CSS/Section/Script, atur urutannya, lalu gabungkan &amp; terapkan langsung ke Pratinjau.
+                    Unggah banyak file <span className="font-mono">.xml</span> atau tempel fragmen CSS/Section/Script, atur urutannya, lalu gabungkan &amp; terapkan langsung ke Studio XML.
                   </p>
                 </div>
 
@@ -1456,13 +1456,13 @@ export const XmlSplitterMergerView: React.FC<XmlSplitterMergerViewProps> = ({
                         onApplyMergedXml(
                           mergeResult.mergedXml,
                           `Gabungan XML (${mergeResult.sourcePartsCount} bagian)`,
-                          'preview'
+                          'layout'
                         )
                       }
                       className="flex items-center justify-center gap-1.5 px-3 py-2.5 min-h-[42px] text-xs font-semibold bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white rounded-lg cursor-pointer"
                     >
                       <Play className="w-3.5 h-3.5" />
-                      <span>Terapkan ke Pratinjau</span>
+                      <span>Terapkan ke Tata Letak</span>
                     </button>
 
                     <button

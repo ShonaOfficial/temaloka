@@ -35,7 +35,7 @@ interface AiChatDrawerProps {
 }
 
 const PAGE_LABELS: Record<WorkspaceAiPage, string> = {
-  preview: 'Pratinjau',
+  domain: 'Cari Domain',
   layout: 'Tata Letak',
   seo: 'SEO & Iklan',
   errors: 'Diagnosa Error',
@@ -46,9 +46,9 @@ const PAGE_LABELS: Record<WorkspaceAiPage, string> = {
 };
 
 const QUICK_PROMPTS_BY_PAGE: Record<WorkspaceAiPage, string[]> = {
-  preview: [
-    'Buat CSS agar kartu artikel dan tampilan mobile lebih rapi',
-    'Apa kelemahan tata letak template XML ini?',
+  domain: [
+    'Berikan 10 ide nama domain singkat dan brandable untuk blog teknologi/tutorial',
+    'Bagaimana cara setting CNAME custom domain Namecheap ke Blogger?',
   ],
   layout: [
     'Analisa struktur b:section dan b:widget pada template ini',
@@ -361,7 +361,7 @@ export const AiChatDrawer: React.FC<AiChatDrawerProps> = ({
           'Periksa error sintaks, tag belum tertutup, atau script bermasalah di bagian XML ini',
           'Buatkan perbaikan kode atau CSS yang siap tempel untuk bagian XML terlampir',
         ]
-      : QUICK_PROMPTS_BY_PAGE[activePage] || QUICK_PROMPTS_BY_PAGE.preview;
+      : QUICK_PROMPTS_BY_PAGE[activePage] || QUICK_PROMPTS_BY_PAGE.domain;
 
   return (
     <>

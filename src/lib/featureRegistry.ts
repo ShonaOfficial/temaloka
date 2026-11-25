@@ -51,10 +51,10 @@ export interface PremiumSettingsConfig {
 export const FEATURE_REGISTRY: FeatureDefinition[] = [
   // Ruang Kerja
   {
-    id: 'workspace_preview',
-    name: 'Pratinjau Responsif Real-Time (Desktop / Tablet / Smartphone)',
+    id: 'workspace_domain',
+    name: 'Pencari Nama Domain & Afiliasi Registrar (Gaya Namecheap)',
     category: 'Ruang Kerja',
-    description: 'Pratinjau langsung hasil kompilasi XML Blogger di berbagai ukuran layar.',
+    description: 'Cek ketersediaan nama domain multi-ekstensi secara real-time dengan link registrasi partner afiliasi.',
     defaultTier: 'free',
     defaultEnabled: true,
   },

@@ -12,14 +12,17 @@ import {
   type SiteAdsenseConfig,
 } from '../types/adsense.ts';
 import {
+  DEFAULT_DOMAIN_AFFILIATE_CONFIG,
   DEFAULT_PAYMENT_SETTINGS,
   DEFAULT_SITE_SEO_CONFIG,
+  normalizeDomainAffiliateConfig,
   normalizePaymentSettings,
   type AdminAuthStatus,
   type AuthUserSession,
   type CloudflareD1AdminConfigView,
   type CloudflareD1UpdatePayload,
   type DbStorageMode,
+  type DomainAffiliateConfig,
   type ManagedUserRow,
   type PaymentSettingsConfig,
   type SiteSeoConfig,
@@ -1516,5 +1519,24 @@ export async function savePaymentSettingsConfig(
     updatedByEmail: adminEmail,
   };
   await setAppConfigJson('payment_settings', saved, adminEmail);
+  return saved;
+}
+
+export async function getDomainAffiliateConfig(): Promise<DomainAffiliateConfig> {
+  const raw = await getAppConfigJson<unknown>('domain_affiliate_settings', null);
+  return raw ? normalizeDomainAffiliateConfig(raw) : DEFAULT_DOMAIN_AFFILIATE_CONFIG;
+}
+
+export async function saveDomainAffiliateConfig(
+  next: unknown,
+  adminEmail: string
+): Promise<DomainAffiliateConfig> {
+  const normalized = normalizeDomainAffiliateConfig(next);
+  const saved: DomainAffiliateConfig = {
+    ...normalized,
+    updatedAtMs: Date.now(),
+    updatedByEmail: adminEmail,
+  };
+  await setAppConfigJson('domain_affiliate_settings', saved, adminEmail);
   return saved;
 }
