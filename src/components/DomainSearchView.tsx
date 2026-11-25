@@ -26,7 +26,11 @@ import {
   type DomainTldCategory,
   type DomainTldPricingRule,
 } from '../types/admin';
-import type { DomainCheckItemResult, DomainSearchResponse } from '../server/domainLookupService';
+import {
+  checkDomainAvailabilityWeb,
+  type DomainCheckItemResult,
+  type DomainSearchResponse,
+} from '../lib/domainLookupCore';
 
 interface DomainSearchViewProps {
   domainConfig: DomainAffiliateConfig;
@@ -200,23 +204,64 @@ export const DomainSearchView: React.FC<DomainSearchViewProps> = ({
 
       setLoading(true);
       setErrorMsg(null);
+      const tldsToUse = tldsOverride || activeTldsForCategory;
       try {
-        const res = await fetch('/api/domain/check', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            query: clean,
-            tlds: tldsOverride || activeTldsForCategory,
-            includeSuggestions: true,
-          }),
-        });
-        const data = (await res.json()) as DomainSearchResponse & { error?: string };
-        if (!res.ok) {
-          throw new Error(data.error || 'Gagal memeriksa ketersediaan domain.');
+        let resolvedData: DomainSearchResponse | null = null;
+        let shouldFallbackToWeb = false;
+
+        try {
+          const res = await fetch('/api/domain/check', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              query: clean,
+              tlds: tldsToUse,
+              includeSuggestions: true,
+            }),
+          });
+          const rawText = await res.text();
+          let parsed: (DomainSearchResponse & { error?: string }) | null = null;
+          if (rawText.trim()) {
+            try {
+              parsed = JSON.parse(rawText) as DomainSearchResponse & { error?: string };
+            } catch {
+              parsed = null;
+            }
+          }
+
+          if (res.ok && parsed && parsed.primaryResult) {
+            resolvedData = parsed;
+          } else if (!res.ok && parsed && typeof parsed.error === 'string' && parsed.error.trim() && res.status !== 404 && res.status !== 405 && res.status !== 501) {
+            throw new Error(parsed.error);
+          } else {
+            shouldFallbackToWeb = true;
+          }
+        } catch (apiErr) {
+          if (
+            apiErr instanceof Error &&
+            /minimal|karakter|valid/i.test(apiErr.message)
+          ) {
+            throw apiErr;
+          }
+          shouldFallbackToWeb = true;
         }
-        setSearchResult(data);
+
+        if (!resolvedData && shouldFallbackToWeb) {
+          resolvedData = await checkDomainAvailabilityWeb({
+            query: clean,
+            tlds: tldsToUse,
+            includeSuggestions: true,
+          });
+        }
+
+        if (!resolvedData || !resolvedData.primaryResult) {
+          throw new Error('Gagal memeriksa ketersediaan domain.');
+        }
+
+        setSearchResult(resolvedData);
         setSearchHistory((prev) => {
-          const next = [data.primaryResult?.domain || clean, ...prev.filter((x) => x !== (data.primaryResult?.domain || clean))];
+          const primaryDom = resolvedData.primaryResult?.domain || clean;
+          const next = [primaryDom, ...prev.filter((x) => x !== primaryDom)];
           return next.slice(0, 8);
         });
       } catch (err) {
