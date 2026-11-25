@@ -38,7 +38,7 @@ import {
   testCloudflareD1Connection,
   updatePrimaryAdminAccount,
   verifySessionToken,
-} from './src/server/d1Database';
+} from './src/server/d1Database.ts';
 import {
   callFreeLlmChat,
   callFreeLlmJson,
@@ -47,7 +47,7 @@ import {
   saveFreeLlmConfig,
   testFreeLlmGateway,
   toFreeLlmAdminView,
-} from './src/server/freellmService';
+} from './src/server/freellmService.ts';
 import {
   getEffectiveGeminiApiKey,
   getGoogleCloudPublicStatus,
@@ -56,15 +56,15 @@ import {
   testGoogleCloudConnection,
   toGoogleCloudAdminView,
   warmGoogleCloudConfigCache,
-} from './src/server/googleCloudService';
-import { FREELLM_MODELS } from './src/lib/aiEngineCatalog';
+} from './src/server/googleCloudService.ts';
+import { FREELLM_MODELS } from './src/lib/aiEngineCatalog.ts';
 import {
   ADSENSE_FIELD_LIMITS,
   sanitizeSlotDigits,
   type AdsenseUnitFormatType,
   type AdsenseUnitPlacementType,
-} from './src/types/adsense';
-import type { AuthUserSession } from './src/types/admin';
+} from './src/types/adsense.ts';
+import type { AuthUserSession } from './src/types/admin.ts';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);

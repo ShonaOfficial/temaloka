@@ -2,14 +2,14 @@ import type {
   GoogleCloudAdminConfigView,
   GoogleCloudPublicStatus,
   GoogleCloudUpdatePayload,
-} from '../types/admin';
+} from '../types/admin.ts';
 import {
   dbGet,
   dbRun,
   decryptSecretPayload,
   encryptSecretPayload,
   maskSecret,
-} from './d1Database';
+} from './d1Database.ts';
 
 export interface StoredGoogleCloudSecrets {
   enabled: boolean;

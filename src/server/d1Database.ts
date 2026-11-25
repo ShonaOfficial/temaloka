@@ -10,7 +10,7 @@ import {
   sanitizeSlotDigits,
   type AdsenseUnitRecord,
   type SiteAdsenseConfig,
-} from '../types/adsense';
+} from '../types/adsense.ts';
 import {
   DEFAULT_PAYMENT_SETTINGS,
   DEFAULT_SITE_SEO_CONFIG,
@@ -24,7 +24,7 @@ import {
   type PaymentSettingsConfig,
   type SiteSeoConfig,
   type UserAccountTier,
-} from '../types/admin';
+} from '../types/admin.ts';
 import {
   DEFAULT_PREMIUM_CONFIG,
   normalizePremiumConfig,
@@ -32,7 +32,7 @@ import {
   sanitizeProPlanId,
   type FeatureOverrideValue,
   type PremiumSettingsConfig,
-} from '../lib/featureRegistry';
+} from '../lib/featureRegistry.ts';
 
 const DATA_DIR = path.resolve(process.cwd(), '.data');
 const SQLITE_DB_PATH = path.join(DATA_DIR, 'temaloka_d1.sqlite');

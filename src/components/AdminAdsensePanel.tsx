@@ -74,10 +74,13 @@ import {
 } from '../types/admin';
 import {
   buildDefaultPremiumConfig,
+  buildDefaultProPlans,
   FEATURE_REGISTRY,
   type FeatureCategory,
   type FeatureOverrideValue,
   type PremiumSettingsConfig,
+  type ProPlanBadgeColor,
+  type ProPlanDefinition,
 } from '../lib/featureRegistry';
 import { FREELLM_MODELS } from '../lib/aiEngineCatalog';
 import {
@@ -223,12 +226,20 @@ export const AdminAdsensePanel: React.FC<AdminAdsensePanelProps> = ({
     error?: string;
   } | null>(null);
 
-  // Premium Pro/Free checklist state
+  // Premium Pro/Free checklist & multi-tier Pro Plans state
   const [premiumDraft, setPremiumDraft] = useState<PremiumSettingsConfig>(
     siteAdsense.premiumConfig
   );
   const [premiumDirty, setPremiumDirty] = useState(false);
   const [featureCatFilter, setFeatureCatFilter] = useState<'all' | FeatureCategory>('all');
+  const [editingPlanId, setEditingPlanId] = useState<string | null>(null);
+  const [planNameInput, setPlanNameInput] = useState('');
+  const [planPriceInput, setPlanPriceInput] = useState('');
+  const [planCycleInput, setPlanCycleInput] = useState('');
+  const [planDescInput, setPlanDescInput] = useState('');
+  const [planBadgeColor, setPlanBadgeColor] = useState<ProPlanBadgeColor>('amber');
+  const [planEnabledInput, setPlanEnabledInput] = useState(true);
+  const [planFeatureIdsInput, setPlanFeatureIdsInput] = useState<string[]>([]);
 
   // Web SEO config state
   const [seoDraft, setSeoDraft] = useState<SiteSeoConfig>(siteAdsense.seoConfig);
@@ -814,10 +825,120 @@ export const AdminAdsensePanel: React.FC<AdminAdsensePanelProps> = ({
     try {
       await siteAdsense.savePremiumConfig(premiumDraft);
       setPremiumDirty(false);
-      onNotify?.('Daftar Fitur Pro/Free berhasil disimpan ke database.', 'success');
+      onNotify?.('Daftar Fitur & Jenis Paket Pro berhasil disimpan ke database.', 'success');
     } catch (err) {
       onNotify?.(err instanceof Error ? err.message : 'Gagal menyimpan Fitur Pro/Free.', 'error');
     }
+  };
+
+  // Multi-tier Pro Plan CRUD handlers
+  const resetProPlanForm = () => {
+    setEditingPlanId(null);
+    setPlanNameInput('');
+    setPlanPriceInput('');
+    setPlanCycleInput('');
+    setPlanDescInput('');
+    setPlanBadgeColor('amber');
+    setPlanEnabledInput(true);
+    setPlanFeatureIdsInput(
+      FEATURE_REGISTRY.filter(
+        (f) => (premiumDraft.rules[f.id]?.tier || f.defaultTier) === 'pro'
+      ).map((f) => f.id)
+    );
+  };
+
+  const startEditProPlan = (plan: ProPlanDefinition) => {
+    setEditingPlanId(plan.id);
+    setPlanNameInput(plan.name);
+    setPlanPriceInput(plan.priceLabel);
+    setPlanCycleInput(plan.billingCycleLabel);
+    setPlanDescInput(plan.description);
+    setPlanBadgeColor(plan.badgeColor);
+    setPlanEnabledInput(plan.enabled);
+    setPlanFeatureIdsInput([...plan.enabledFeatureIds]);
+  };
+
+  const toggleFeatureInDraftPlan = (featureId: string) => {
+    setPlanFeatureIdsInput((prev) =>
+      prev.includes(featureId) ? prev.filter((id) => id !== featureId) : [...prev, featureId]
+    );
+  };
+
+  const handleSaveProPlanDraft = (e: React.FormEvent) => {
+    e.preventDefault();
+    const cleanName = planNameInput.trim();
+    if (!cleanName) {
+      onNotify?.('Isi nama jenis paket Pro terlebih dahulu.', 'error');
+      return;
+    }
+    const existingPlans = premiumDraft.proPlans || [];
+    const targetId =
+      editingPlanId ||
+      `pro_${Date.now().toString(36)}_${cleanName
+        .toLowerCase()
+        .replace(/[^a-z0-9]/g, '')
+        .slice(0, 10) || 'plan'}`;
+
+    const nextPlan: ProPlanDefinition = {
+      id: targetId,
+      name: cleanName.slice(0, 80),
+      priceLabel: planPriceInput.trim().slice(0, 60),
+      billingCycleLabel: planCycleInput.trim().slice(0, 80),
+      description: planDescInput.trim().slice(0, 240),
+      badgeColor: planBadgeColor,
+      enabled: planEnabledInput,
+      enabledFeatureIds: Array.from(new Set(planFeatureIdsInput)),
+    };
+
+    const nextPlans = editingPlanId
+      ? existingPlans.map((p) => (p.id === editingPlanId ? nextPlan : p))
+      : [...existingPlans, nextPlan];
+
+    setPremiumDraft((prev) => ({
+      ...prev,
+      proPlans: nextPlans,
+      defaultProPlanId: prev.defaultProPlanId || nextPlan.id,
+    }));
+    setPremiumDirty(true);
+    resetProPlanForm();
+    onNotify?.(
+      `Jenis Paket Pro "${nextPlan.name}" ditambahkan ke draf. Klik "Simpan Daftar Pro/Free" untuk menerapkan.`,
+      'info'
+    );
+  };
+
+  const toggleFeatureOnExistingPlan = (planId: string, featureId: string) => {
+    setPremiumDraft((prev) => ({
+      ...prev,
+      proPlans: (prev.proPlans || []).map((p) => {
+        if (p.id !== planId) return p;
+        const has = p.enabledFeatureIds.includes(featureId);
+        return {
+          ...p,
+          enabledFeatureIds: has
+            ? p.enabledFeatureIds.filter((id) => id !== featureId)
+            : [...p.enabledFeatureIds, featureId],
+        };
+      }),
+    }));
+    setPremiumDirty(true);
+  };
+
+  const handleDeleteProPlan = (planId: string) => {
+    setPremiumDraft((prev) => {
+      const remaining = (prev.proPlans || []).filter((p) => p.id !== planId);
+      const nextDefault =
+        prev.defaultProPlanId === planId
+          ? remaining.find((p) => p.enabled)?.id || remaining[0]?.id || ''
+          : prev.defaultProPlanId;
+      return {
+        ...prev,
+        proPlans: remaining,
+        defaultProPlanId: nextDefault,
+      };
+    });
+    if (editingPlanId === planId) resetProPlanForm();
+    setPremiumDirty(true);
   };
 
   // SEO Handlers
@@ -956,26 +1077,53 @@ export const AdminAdsensePanel: React.FC<AdminAdsensePanelProps> = ({
     }
   };
 
-  const handleToggleUserTier = async (targetUser: ManagedUserRow, nextTier: UserAccountTier) => {
+  const handleToggleUserTier = async (
+    targetUser: ManagedUserRow,
+    nextTier: UserAccountTier,
+    nextProPlanId?: string | null
+  ) => {
     if (!sessionToken) return;
     setLoadingUsers(true);
     try {
+      const resolvedPlanId =
+        nextTier === 'pro'
+          ? nextProPlanId ??
+            targetUser.proPlanId ??
+            premiumDraft.defaultProPlanId ??
+            premiumDraft.proPlans?.[0]?.id ??
+            null
+          : null;
       const res = await fetch(`/api/admin/users/${encodeURIComponent(targetUser.id)}/tier`, {
         method: 'PUT',
         headers: {
           'Content-Type': 'application/json',
           Authorization: `Bearer ${sessionToken}`,
         },
-        body: JSON.stringify({ tier: nextTier }),
+        body: JSON.stringify({ tier: nextTier, proPlanId: resolvedPlanId }),
       });
-      const data = (await res.json()) as { ok?: boolean; error?: string };
+      const data = (await res.json()) as {
+        ok?: boolean;
+        tier?: UserAccountTier;
+        proPlanId?: string | null;
+        error?: string;
+      };
       if (!res.ok) throw new Error(data.error || 'Gagal memperbarui tier pengguna.');
+      const savedTier = data.tier || nextTier;
+      const savedPlanId = savedTier === 'pro' ? (data.proPlanId ?? resolvedPlanId) : null;
       setManagedUsers((prev) =>
-        prev.map((u) => (u.id === targetUser.id ? { ...u, tier: nextTier } : u))
+        prev.map((u) =>
+          u.id === targetUser.id ? { ...u, tier: savedTier, proPlanId: savedPlanId } : u
+        )
       );
-      onNotify?.(`Tier ${targetUser.email} diubah ke ${nextTier.toUpperCase()}.`, 'success');
+      const planName = (premiumDraft.proPlans || []).find((p) => p.id === savedPlanId)?.name;
+      onNotify?.(
+        savedTier === 'pro'
+          ? `Status ${targetUser.email} diubah ke PREMIUM${planName ? ` (${planName})` : ''}.`
+          : `Status ${targetUser.email} diubah ke FREE.`,
+        'success'
+      );
     } catch (err) {
-      onNotify?.(err instanceof Error ? err.message : 'Gagal mengubah tier.', 'error');
+      onNotify?.(err instanceof Error ? err.message : 'Gagal mengubah status langganan.', 'error');
     } finally {
       setLoadingUsers(false);
     }
@@ -2699,7 +2847,7 @@ export const AdminAdsensePanel: React.FC<AdminAdsensePanelProps> = ({
                     ))}
                   </div>
 
-                  {/* Checklist Cards / Grid */}
+                    {/* Checklist Cards / Grid */}
                   <div className="space-y-2">
                     {filteredFeatures.map((feat) => {
                       const rule = premiumDraft.rules[feat.id] || {
@@ -2769,6 +2917,345 @@ export const AdminAdsensePanel: React.FC<AdminAdsensePanelProps> = ({
                         </div>
                       );
                     })}
+                  </div>
+                </section>
+
+                {/* MULTI-TIER PRO PLANS SECTION */}
+                <section className="bg-white border border-slate-200 rounded-xl p-4 sm:p-5 space-y-4">
+                  <div className="flex flex-wrap items-center justify-between gap-3 pb-3 border-b border-slate-100">
+                    <div>
+                      <h3 className="text-sm font-bold text-slate-900 flex items-center gap-1.5">
+                        <Crown className="w-4 h-4 text-amber-600" />
+                        <span>Jenis Paket Pro &amp; Aktivasi Fitur Per Paket ({(premiumDraft.proPlans || []).length})</span>
+                      </h3>
+                      <p className="text-[11px] text-slate-500">
+                        Buat beberapa jenis paket Pro (misal: <em>Pro Hemat</em>, <em>Pro SEO</em>, <em>Pro Lengkap</em>) dengan kombinasi fitur Pro berbeda pada masing-masing paket, lalu tetapkan paket ke akun pengguna di tab Akun &amp; User.
+                      </p>
+                    </div>
+                    <div className="flex flex-wrap items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setPremiumDraft((prev) => ({
+                            ...prev,
+                            proPlans: buildDefaultProPlans(),
+                            defaultProPlanId: 'pro_full',
+                          }));
+                          setPremiumDirty(true);
+                        }}
+                        className="px-3 py-2 min-h-[38px] text-xs font-semibold bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg cursor-pointer"
+                      >
+                        Reset Paket Default
+                      </button>
+                      <button
+                        type="button"
+                        disabled={siteAdsense.savingConfig}
+                        onClick={() => void handleSavePremium()}
+                        className={`flex items-center gap-1.5 px-4 py-2 min-h-[38px] text-xs font-semibold rounded-lg cursor-pointer ${
+                          premiumDirty
+                            ? 'bg-emerald-600 hover:bg-emerald-700 text-white'
+                            : 'bg-slate-900 hover:bg-slate-800 text-white'
+                        }`}
+                      >
+                        <Save className="w-3.5 h-3.5" />
+                        <span>Simpan Paket Pro</span>
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Create / Edit Pro Plan Form */}
+                  <form
+                    onSubmit={handleSaveProPlanDraft}
+                    className="p-3.5 rounded-xl bg-slate-50 border border-slate-200 space-y-3 text-xs"
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="font-bold text-slate-900">
+                        {editingPlanId ? 'Edit Jenis Paket Pro' : 'Tambah Jenis Paket Pro Baru'}
+                      </span>
+                      {editingPlanId && (
+                        <button
+                          type="button"
+                          onClick={resetProPlanForm}
+                          className="text-[11px] font-semibold text-slate-600 hover:text-slate-900 cursor-pointer"
+                        >
+                          Batal Edit
+                        </button>
+                      )}
+                    </div>
+
+                    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2.5">
+                      <div className="space-y-1">
+                        <label className="block text-[11px] font-semibold text-slate-700">
+                          Nama Jenis Pro
+                        </label>
+                        <input
+                          type="text"
+                          value={planNameInput}
+                          onChange={(e) => setPlanNameInput(e.target.value)}
+                          placeholder="Misal: Pro Creator / Pro Agency"
+                          className="w-full px-3 py-2 text-xs bg-white border border-slate-200 rounded-lg"
+                        />
+                      </div>
+                      <div className="space-y-1">
+                        <label className="block text-[11px] font-semibold text-slate-700">
+                          Label Harga
+                        </label>
+                        <input
+                          type="text"
+                          value={planPriceInput}
+                          onChange={(e) => setPlanPriceInput(e.target.value)}
+                          placeholder="Misal: Rp 149.000"
+                          className="w-full px-3 py-2 text-xs bg-white border border-slate-200 rounded-lg"
+                        />
+                      </div>
+                      <div className="space-y-1">
+                        <label className="block text-[11px] font-semibold text-slate-700">
+                          Siklus / Masa Aktif
+                        </label>
+                        <input
+                          type="text"
+                          value={planCycleInput}
+                          onChange={(e) => setPlanCycleInput(e.target.value)}
+                          placeholder="Misal: Tahunan / Lifetime"
+                          className="w-full px-3 py-2 text-xs bg-white border border-slate-200 rounded-lg"
+                        />
+                      </div>
+                      <div className="space-y-1">
+                        <label className="block text-[11px] font-semibold text-slate-700">
+                          Warna Badge
+                        </label>
+                        <select
+                          value={planBadgeColor}
+                          onChange={(e) => setPlanBadgeColor(e.target.value as ProPlanBadgeColor)}
+                          className="w-full px-3 py-2 text-xs bg-white border border-slate-200 rounded-lg"
+                        >
+                          <option value="amber">Emas (Amber)</option>
+                          <option value="emerald">Hijau (Emerald)</option>
+                          <option value="blue">Biru (Blue)</option>
+                          <option value="violet">Ungu (Violet)</option>
+                          <option value="rose">Merah Muda (Rose)</option>
+                        </select>
+                      </div>
+                    </div>
+
+                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5 items-center">
+                      <div className="sm:col-span-2 space-y-1">
+                        <label className="block text-[11px] font-semibold text-slate-700">
+                          Deskripsi Singkat Paket
+                        </label>
+                        <input
+                          type="text"
+                          value={planDescInput}
+                          onChange={(e) => setPlanDescInput(e.target.value)}
+                          placeholder="Keterangan singkat cakupan fitur paket ini..."
+                          className="w-full px-3 py-2 text-xs bg-white border border-slate-200 rounded-lg"
+                        />
+                      </div>
+                      <label className="flex items-center gap-2 pt-4 cursor-pointer select-none">
+                        <input
+                          type="checkbox"
+                          checked={planEnabledInput}
+                          onChange={(e) => setPlanEnabledInput(e.target.checked)}
+                          className="w-4 h-4 accent-emerald-600 rounded"
+                        />
+                        <span className="font-semibold text-slate-800">Aktifkan Paket Ini</span>
+                      </label>
+                    </div>
+
+                    <div className="space-y-1.5">
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="text-[11px] font-semibold text-slate-700">
+                          Fitur yang Diaktifkan di Paket Ini ({planFeatureIdsInput.length}/{FEATURE_REGISTRY.length})
+                        </span>
+                        <div className="flex items-center gap-2">
+                          <button
+                            type="button"
+                            onClick={() =>
+                              setPlanFeatureIdsInput(
+                                FEATURE_REGISTRY.filter(
+                                  (f) => (premiumDraft.rules[f.id]?.tier || f.defaultTier) === 'pro'
+                                ).map((f) => f.id)
+                              )
+                            }
+                            className="text-[11px] font-semibold text-blue-700 hover:underline cursor-pointer"
+                          >
+                            Pilih Semua Fitur PRO
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setPlanFeatureIdsInput([])}
+                            className="text-[11px] text-slate-500 hover:underline cursor-pointer"
+                          >
+                            Kosongkan
+                          </button>
+                        </div>
+                      </div>
+                      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-1.5 max-h-44 overflow-y-auto p-2 bg-white rounded-lg border border-slate-200">
+                        {FEATURE_REGISTRY.map((feat) => {
+                          const checked = planFeatureIdsInput.includes(feat.id);
+                          const isGlobalPro =
+                            (premiumDraft.rules[feat.id]?.tier || feat.defaultTier) === 'pro';
+                          return (
+                            <label
+                              key={feat.id}
+                              className={`flex items-center gap-2 p-1.5 rounded border text-[11px] cursor-pointer ${
+                                checked
+                                  ? 'bg-amber-50 border-amber-300 text-slate-900 font-medium'
+                                  : 'bg-slate-50/60 border-slate-200 text-slate-600'
+                              }`}
+                            >
+                              <input
+                                type="checkbox"
+                                checked={checked}
+                                onChange={() => toggleFeatureInDraftPlan(feat.id)}
+                                className="w-3.5 h-3.5 accent-amber-600 rounded shrink-0"
+                              />
+                              <span className="truncate flex-1">{feat.name.split('(')[0].trim()}</span>
+                              {isGlobalPro && (
+                                <span className="px-1 py-0.5 text-[9px] font-bold bg-amber-100 text-amber-900 rounded shrink-0">
+                                  PRO
+                                </span>
+                              )}
+                            </label>
+                          );
+                        })}
+                      </div>
+                    </div>
+
+                    <div className="flex justify-end">
+                      <button
+                        type="submit"
+                        className="flex items-center gap-1.5 px-4 py-2 min-h-[38px] bg-slate-900 hover:bg-slate-800 text-white text-xs font-semibold rounded-lg cursor-pointer"
+                      >
+                        <PlusCircle className="w-4 h-4" />
+                        <span>{editingPlanId ? 'Perbarui Paket Pro' : 'Tambah Jenis Paket Pro'}</span>
+                      </button>
+                    </div>
+                  </form>
+
+                  {/* Configured Pro Plans List with Quick Per-Plan Feature Checkboxes */}
+                  <div className="space-y-3">
+                    {(premiumDraft.proPlans || []).length === 0 ? (
+                      <div className="text-xs text-slate-500 py-5 text-center border border-dashed border-slate-200 rounded-xl">
+                        Belum ada jenis paket Pro. Tambahkan di formulir di atas.
+                      </div>
+                    ) : (
+                      (premiumDraft.proPlans || []).map((plan) => {
+                        const isDefault = premiumDraft.defaultProPlanId === plan.id;
+                        const proOnlyFeatures = FEATURE_REGISTRY.filter(
+                          (f) => (premiumDraft.rules[f.id]?.tier || f.defaultTier) === 'pro'
+                        );
+                        const featuresToToggle =
+                          proOnlyFeatures.length > 0 ? proOnlyFeatures : FEATURE_REGISTRY.slice(0, 8);
+                        return (
+                          <div
+                            key={plan.id}
+                            className="p-3.5 rounded-xl border border-slate-200 bg-slate-50/70 space-y-2.5 text-xs"
+                          >
+                            <div className="flex flex-wrap items-start justify-between gap-2">
+                              <div className="min-w-0 space-y-0.5">
+                                <div className="flex items-center gap-2 flex-wrap">
+                                  <span className="font-bold text-slate-900 text-xs sm:text-sm">
+                                    {plan.name}
+                                  </span>
+                                  {plan.priceLabel && (
+                                    <span className="px-2 py-0.5 text-[10px] font-bold rounded bg-amber-100 text-amber-900 border border-amber-300">
+                                      {plan.priceLabel}
+                                    </span>
+                                  )}
+                                  {plan.billingCycleLabel && (
+                                    <span className="text-[11px] text-slate-500">
+                                      {plan.billingCycleLabel}
+                                    </span>
+                                  )}
+                                  {isDefault && (
+                                    <span className="px-1.5 py-0.5 text-[10px] font-bold rounded bg-blue-100 text-blue-800 border border-blue-200">
+                                      Default Upgrade Pro
+                                    </span>
+                                  )}
+                                  <span
+                                    className={`px-1.5 py-0.5 text-[10px] font-semibold rounded ${
+                                      plan.enabled
+                                        ? 'bg-emerald-100 text-emerald-800'
+                                        : 'bg-slate-200 text-slate-600'
+                                    }`}
+                                  >
+                                    {plan.enabled ? 'Aktif' : 'Nonaktif'}
+                                  </span>
+                                </div>
+                                {plan.description && (
+                                  <p className="text-[11px] text-slate-600">{plan.description}</p>
+                                )}
+                              </div>
+
+                              <div className="flex flex-wrap items-center gap-1.5 shrink-0">
+                                {!isDefault && (
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      setPremiumDraft((prev) => ({
+                                        ...prev,
+                                        defaultProPlanId: plan.id,
+                                      }));
+                                      setPremiumDirty(true);
+                                    }}
+                                    className="px-2.5 py-1.5 text-[11px] font-medium bg-white border border-slate-200 hover:bg-slate-100 rounded-lg cursor-pointer"
+                                  >
+                                    Jadikan Default
+                                  </button>
+                                )}
+                                <button
+                                  type="button"
+                                  onClick={() => startEditProPlan(plan)}
+                                  className="px-2.5 py-1.5 text-[11px] font-semibold bg-white border border-slate-200 hover:bg-slate-100 rounded-lg cursor-pointer"
+                                >
+                                  Edit
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => handleDeleteProPlan(plan.id)}
+                                  aria-label={`Hapus paket ${plan.name}`}
+                                  className="p-1.5 rounded-lg bg-white border border-rose-200 text-rose-700 hover:bg-rose-50 cursor-pointer"
+                                >
+                                  <Trash2 className="w-3.5 h-3.5" />
+                                </button>
+                              </div>
+                            </div>
+
+                            <div className="space-y-1">
+                              <div className="text-[11px] font-semibold text-slate-700">
+                                Ceklis Cepat Fitur PRO Aktif ({plan.enabledFeatureIds.length} aktif):
+                              </div>
+                              <div className="flex flex-wrap gap-1.5">
+                                {featuresToToggle.map((feat) => {
+                                  const active = plan.enabledFeatureIds.includes(feat.id);
+                                  return (
+                                    <label
+                                      key={feat.id}
+                                      className={`inline-flex items-center gap-1.5 px-2 py-1 rounded-lg border text-[11px] cursor-pointer select-none ${
+                                        active
+                                          ? 'bg-emerald-50 border-emerald-300 text-emerald-900 font-semibold'
+                                          : 'bg-white border-slate-200 text-slate-600'
+                                      }`}
+                                    >
+                                      <input
+                                        type="checkbox"
+                                        checked={active}
+                                        onChange={() =>
+                                          toggleFeatureOnExistingPlan(plan.id, feat.id)
+                                        }
+                                        className="w-3.5 h-3.5 accent-emerald-600 rounded"
+                                      />
+                                      <span>{feat.name.split('(')[0].trim()}</span>
+                                    </label>
+                                  );
+                                })}
+                              </div>
+                            </div>
+                          </div>
+                        );
+                      })
+                    )}
                   </div>
                 </section>
               </div>
@@ -4146,9 +4633,21 @@ export const AdminAdsensePanel: React.FC<AdminAdsensePanelProps> = ({
                             const overrides = u.featureOverrides || {};
                             const overrideCount = Object.keys(overrides).length;
                             const isExpanded = editingFeaturesUserId === u.id;
+                            const availablePlans = premiumDraft.proPlans || [];
+                            const assignedPlan =
+                              u.tier === 'pro'
+                                ? availablePlans.find((p) => p.id === u.proPlanId) ||
+                                  availablePlans.find((p) => p.id === premiumDraft.defaultProPlanId) ||
+                                  availablePlans[0] ||
+                                  null
+                                : null;
+                            const planIncludesFreeAds = assignedPlan
+                              ? assignedPlan.enabled && assignedPlan.enabledFeatureIds.includes('free_ads')
+                              : u.tier === 'pro';
                             const freeAdsEffective =
                               overrides.free_ads === 'allow' ||
-                              (overrides.free_ads !== 'deny' && u.tier === 'pro');
+                              (overrides.free_ads !== 'deny' && planIncludesFreeAds);
+
                             return (
                               <div
                                 key={u.id}
@@ -4167,7 +4666,9 @@ export const AdminAdsensePanel: React.FC<AdminAdsensePanelProps> = ({
                                             : 'bg-white text-slate-700 border border-slate-300'
                                         }`}
                                       >
-                                        {u.tier.toUpperCase()}
+                                        {u.tier === 'pro'
+                                          ? `PREMIUM${assignedPlan ? ` · ${assignedPlan.name}` : ''}`
+                                          : 'FREE'}
                                       </span>
                                       {freeAdsEffective && (
                                         <span className="px-1.5 py-0.5 text-[10px] font-semibold rounded bg-emerald-100 text-emerald-800">
@@ -4181,7 +4682,12 @@ export const AdminAdsensePanel: React.FC<AdminAdsensePanelProps> = ({
                                       )}
                                     </div>
                                     <div className="text-[11px] text-slate-500 mt-0.5">
-                                      {u.displayName} · Role: {u.role}
+                                      {u.displayName} · Langganan:{' '}
+                                      <strong>
+                                        {u.tier === 'pro'
+                                          ? `Premium (${assignedPlan?.name || 'Paket Pro'})`
+                                          : 'Free'}
+                                      </strong>
                                     </div>
                                   </div>
 
@@ -4190,9 +4696,12 @@ export const AdminAdsensePanel: React.FC<AdminAdsensePanelProps> = ({
                                       ADMIN
                                     </span>
                                   ) : (
-                                    <div className="flex flex-wrap items-center gap-1.5 shrink-0">
+                                    <div className="flex flex-wrap items-center gap-2 shrink-0">
+                                      {/* Manual Free / Premium Toggle Switch */}
                                       <button
                                         type="button"
+                                        role="switch"
+                                        aria-checked={u.tier === 'pro'}
                                         disabled={loadingUsers}
                                         onClick={() =>
                                           void handleToggleUserTier(
@@ -4200,16 +4709,44 @@ export const AdminAdsensePanel: React.FC<AdminAdsensePanelProps> = ({
                                             u.tier === 'pro' ? 'free' : 'pro'
                                           )
                                         }
-                                        className={`px-2.5 py-1.5 min-h-[34px] text-[11px] font-bold rounded-lg border cursor-pointer ${
+                                        className={`inline-flex items-center gap-2 px-2.5 py-1.5 min-h-[34px] rounded-lg border text-[11px] font-bold cursor-pointer ${
                                           u.tier === 'pro'
-                                            ? 'bg-amber-100 border-amber-300 text-amber-900 hover:bg-amber-200'
-                                            : 'bg-white border-slate-300 text-slate-800 hover:bg-slate-100'
+                                            ? 'bg-amber-50 border-amber-300 text-amber-950'
+                                            : 'bg-white border-slate-300 text-slate-700 hover:bg-slate-100'
                                         }`}
                                       >
-                                        {u.tier === 'pro'
-                                          ? 'PRO · Turunkan Free'
-                                          : 'FREE · Jadikan PRO'}
+                                        <span
+                                          className={`relative inline-flex h-4 w-7 shrink-0 items-center rounded-full transition-colors ${
+                                            u.tier === 'pro' ? 'bg-amber-500' : 'bg-slate-300'
+                                          }`}
+                                        >
+                                          <span
+                                            className={`inline-block h-3 w-3 transform rounded-full bg-white transition-transform ${
+                                              u.tier === 'pro' ? 'translate-x-3.5' : 'translate-x-0.5'
+                                            }`}
+                                          />
+                                        </span>
+                                        <span>{u.tier === 'pro' ? 'Premium' : 'Free'}</span>
                                       </button>
+
+                                      {/* Assign Specific Pro Plan Type when Premium */}
+                                      {u.tier === 'pro' && availablePlans.length > 0 && (
+                                        <select
+                                          aria-label={`Pilih jenis Pro untuk ${u.email}`}
+                                          disabled={loadingUsers}
+                                          value={assignedPlan?.id || ''}
+                                          onChange={(e) =>
+                                            void handleToggleUserTier(u, 'pro', e.target.value)
+                                          }
+                                          className="px-2 py-1.5 min-h-[34px] text-[11px] font-semibold bg-white border border-amber-300 text-amber-950 rounded-lg cursor-pointer"
+                                        >
+                                          {availablePlans.map((p) => (
+                                            <option key={p.id} value={p.id}>
+                                              {p.name}
+                                            </option>
+                                          ))}
+                                        </select>
+                                      )}
 
                                       <button
                                         type="button"

@@ -4,15 +4,15 @@ import type {
   FreeLlmPublicStatus,
   FreeLlmRoutingStrategy,
   FreeLlmUpdatePayload,
-} from '../types/admin';
+} from '../types/admin.ts';
 import {
   dbGet,
   dbRun,
   decryptSecretPayload,
   encryptSecretPayload,
   maskSecret,
-} from './d1Database';
-import { getEffectiveGeminiApiKey } from './googleCloudService';
+} from './d1Database.ts';
+import { getEffectiveGeminiApiKey } from './googleCloudService.ts';
 
 export interface StoredFreeLlmSecrets {
   enabled: boolean;

@@ -1,5 +1,5 @@
-import type { FeatureOverrideValue, PremiumSettingsConfig } from '../lib/featureRegistry';
-import type { AdsenseUnitRecord, SiteAdsenseConfig } from './adsense';
+import type { FeatureOverrideValue, PremiumSettingsConfig } from '../lib/featureRegistry.ts';
+import type { AdsenseUnitRecord, SiteAdsenseConfig } from './adsense.ts';
 
 export type DbStorageMode = 'cloudflare-d1' | 'local-sqlite';
 export type UserAccountTier = 'free' | 'pro' | 'admin';
