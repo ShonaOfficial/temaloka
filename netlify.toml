@@ -1,0 +1,10 @@
+[build]
+  command = "npm run build"
+  publish = "dist"
+
+[build.environment]
+  NODE_VERSION = "24"
+  # firebase-applet-config.json (and its copy inside temaloka.zip) holds a public
+  # Firebase web API key that Netlify's smart secret detection flags as a
+  # leaked secret, failing the build. The file isn't bundled into the site.
+  SECRETS_SCAN_SMART_DETECTION_OMIT_PATHS = "firebase-applet-config.json,temaloka.zip"
